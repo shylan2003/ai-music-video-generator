@@ -11,19 +11,19 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "build": "vite build && tsc -p tsconfig.electron.json",
     "check": "npm run typecheck && npm run build",
-    "test:e2e-storyboard": "python scripts/e2e_storyboard_smoke.py",
-    "test:lyrics": "python -m unittest scripts/test_lyrics_parser.py",
-    "test:cloud-storyboard": "python -m unittest scripts/test_cloud_storyboard.py",
-    "test:director": "python -m unittest scripts/test_director.py",
-    "test:video-resume": "python -m unittest scripts/test_video_task_resume.py",
+    "test:e2e-storyboard": "node scripts/run_python.js scripts/e2e_storyboard_smoke.py",
+    "test:lyrics": "node scripts/run_python.js -m unittest scripts/test_lyrics_parser.py",
+    "test:cloud-storyboard": "node scripts/run_python.js -m unittest scripts/test_cloud_storyboard.py",
+    "test:director": "node scripts/run_python.js -m unittest scripts/test_director.py",
+    "test:video-resume": "node scripts/run_python.js -m unittest scripts/test_video_task_resume.py",
     "test:export-policy": "tsc -p tsconfig.electron.json && node scripts/test_export_policy.js",
-    "test:e2e-export": "python scripts/e2e_export_mv.py",
-    "backend:exe": "python scripts/build_backend_exe.py",
+    "test:e2e-export": "node scripts/run_python.js scripts/e2e_export_mv.py",
+    "backend:exe": "node scripts/run_python.js scripts/build_backend_exe.py",
     "pack:full": "npm run backend:exe && npm run build && electron-builder --dir",
     "dist:full": "npm run backend:exe && npm run build && electron-builder",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder",
-    "backend": "cd backend && python main.py"
+    "backend": "node scripts/run_python.js backend/main.py"
   },
   "build": {
     "appId": "com.musicvideo.generator",
@@ -34,22 +34,11 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "package.json"
+      "package.json",
+      "!node_modules/**/.env",
+      "!node_modules/**/.env.*"
     ],
     "extraResources": [
-      {
-        "from": "backend",
-        "to": "backend",
-        "filter": [
-          "**/*",
-          "!generated_images/**/*",
-          "!generated_videos/**/*",
-          "!video_tasks.json",
-          "!**/*.part",
-          "!**/__pycache__/**/*",
-          "!**/*.pyc"
-        ]
-      },
       {
         "from": "backend_dist",
         "to": "backend-exe",
@@ -59,8 +48,8 @@
       }
     ],
     "asarUnpack": [
-      "node_modules/ffmpeg-static/**/*",
-      "node_modules/@ffmpeg-installer/**/*"
+      "node_modules/ffmpeg-static/ffmpeg.exe",
+      "node_modules/@ffmpeg-installer/win32-x64/ffmpeg.exe"
     ],
     "win": {
       "target": [

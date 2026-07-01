@@ -95,11 +95,17 @@ function sendExportProgress(payload: ExportProgressPayload) {
 }
 
 function getResolvedFfmpegPath() {
-  if (ffmpegInstallerPath && existsSync(ffmpegInstallerPath)) {
-    return ffmpegInstallerPath
+  const packagedPath = (candidate: string) => {
+    if (!app.isPackaged) return candidate
+    return candidate.replace(
+      `${path.sep}app.asar${path.sep}`,
+      `${path.sep}app.asar.unpacked${path.sep}`
+    )
   }
-
-  return ffmpegPath
+  const candidates = [ffmpegInstallerPath, ffmpegPath]
+    .filter((candidate): candidate is string => Boolean(candidate))
+    .map(packagedPath)
+  return candidates.find((candidate) => existsSync(candidate)) || ''
 }
 
 function getModelSettingsPath() {
