@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 import uvicorn
 import asyncio
@@ -12,6 +12,7 @@ import hmac
 import json
 import base64
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -20,15 +21,163 @@ import httpx
 
 from services.director import analyze_with_deepseek
 from services.lyrics_parser import parse_lyrics
-from services.tongyi_image import generate_tongyi_image
+from services.tongyi_image import generate_tongyi_image, image_to_data_uri
 
-app = FastAPI(title="Music Video Generator API", version="1.1.0")
+app = FastAPI(title="Music Video Generator API", version="2.0.0")
 
 DATA_DIR = Path(os.getenv("MUSIC_VIDEO_DATA_DIR", Path(__file__).resolve().parent))
 GENERATED_DIR = DATA_DIR / "generated_images"
 GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 GENERATED_VIDEO_DIR = DATA_DIR / "generated_videos"
 GENERATED_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+VIDEO_TASKS_PATH = DATA_DIR / "video_tasks.json"
+_video_tasks_lock = asyncio.Lock()
+
+
+def load_video_tasks() -> dict[str, dict]:
+    try:
+        data = json.loads(VIDEO_TASKS_PATH.read_text("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+async def save_video_task(cache_key: str, payload: dict) -> None:
+    async with _video_tasks_lock:
+        tasks = load_video_tasks()
+        tasks[cache_key] = {
+            **tasks.get(cache_key, {}),
+            **payload,
+            "updated_at": time.time(),
+        }
+        temp_path = VIDEO_TASKS_PATH.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(tasks, ensure_ascii=False, indent=2), "utf-8")
+        temp_path.replace(VIDEO_TASKS_PATH)
+
+
+def get_resumable_video_task(cache_key: str, provider: str) -> dict | None:
+    task = load_video_tasks().get(cache_key)
+    if not isinstance(task, dict) or task.get("provider") != provider:
+        return None
+    if task.get("status") in {"failed", "canceled"}:
+        return None
+    return task
+
+
+def basic_video_quality(file_path: Path, requested_duration: float) -> tuple[str, list[str], dict]:
+    errors: list[str] = []
+    metrics: dict = {"size_bytes": 0}
+    try:
+        size = file_path.stat().st_size
+        metrics["size_bytes"] = size
+        if size < 100 * 1024:
+            errors.append("视频文件小于 100KB，可能为空或损坏")
+        with file_path.open("rb") as source:
+            header = source.read(32)
+        if b"ftyp" not in header:
+            errors.append("文件缺少 MP4 ftyp 标记")
+    except OSError as error:
+        errors.append(f"无法读取视频文件：{error}")
+
+    ffmpeg_binary = os.getenv("MUSIC_VIDEO_FFMPEG_PATH", "").strip()
+    if ffmpeg_binary and Path(ffmpeg_binary).is_file() and not errors:
+        command = [
+            ffmpeg_binary,
+            "-hide_banner",
+            "-i",
+            str(file_path),
+            "-vf",
+            "blackdetect=d=0.20:pic_th=0.98,freezedetect=n=-50dB:d=1.50",
+            "-an",
+            "-f",
+            "null",
+            os.devnull,
+        ]
+        try:
+            creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                creationflags=creation_flags,
+                check=False,
+            )
+            probe_output = result.stderr or ""
+            if result.returncode != 0:
+                errors.append("FFmpeg 无法完整解码该片段")
+
+            duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", probe_output)
+            if duration_match:
+                actual_duration = (
+                    int(duration_match.group(1)) * 3600
+                    + int(duration_match.group(2)) * 60
+                    + float(duration_match.group(3))
+                )
+                metrics["duration"] = round(actual_duration, 3)
+                if actual_duration + (1 / 30) < requested_duration:
+                    errors.append(
+                        f"云端片段仅 {actual_duration:.2f} 秒，短于镜头所需 {requested_duration:.2f} 秒"
+                    )
+            else:
+                errors.append("无法读取视频时长")
+
+            video_match = re.search(
+                r"Video:.*?\b(\d{2,5})x(\d{2,5})\b.*?(\d+(?:\.\d+)?)\s*fps",
+                probe_output,
+            )
+            if video_match:
+                width = int(video_match.group(1))
+                height = int(video_match.group(2))
+                fps = float(video_match.group(3))
+                metrics.update({"width": width, "height": height, "fps": fps})
+                if width < 640 or height < 360:
+                    errors.append(f"云端片段分辨率过低：{width}×{height}")
+                if fps < 20:
+                    errors.append(f"云端片段帧率过低：{fps:g}fps")
+            else:
+                errors.append("无法读取视频分辨率或帧率")
+
+            black_durations = [float(value) for value in re.findall(r"black_duration:([0-9.]+)", probe_output)]
+            freeze_durations = [float(value) for value in re.findall(r"freeze_duration:\s*([0-9.]+)", probe_output)]
+            metrics["max_black_seconds"] = max(black_durations, default=0)
+            metrics["max_freeze_seconds"] = max(freeze_durations, default=0)
+            if metrics["max_black_seconds"] > 0.5:
+                errors.append(f"检测到 {metrics['max_black_seconds']:.2f} 秒连续黑帧")
+            if metrics["max_freeze_seconds"] > 2.0:
+                errors.append(f"检测到 {metrics['max_freeze_seconds']:.2f} 秒连续冻结")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            errors.append(f"FFmpeg 质检未完成：{error}")
+    elif not ffmpeg_binary:
+        metrics["probe"] = "ffmpeg_unavailable"
+
+    return ("rejected" if errors else "needs_review", errors, metrics)
+
+
+def completed_video_payload(
+    *,
+    video_url: str,
+    scene_index: int,
+    provider: str,
+    task_id: str,
+    file_path: Path,
+    rendered_duration: float,
+    requested_duration: float,
+    cached: bool = False,
+) -> dict:
+    quality_status, quality_errors, quality_metrics = basic_video_quality(file_path, requested_duration)
+    return {
+        "video_url": video_url,
+        "scene_index": scene_index,
+        "provider": provider,
+        "status": "done",
+        "task_id": task_id,
+        "cached": cached,
+        "rendered_duration": quality_metrics.get("duration", rendered_duration),
+        "quality_status": quality_status,
+        "quality_errors": quality_errors,
+        "quality_metrics": quality_metrics,
+    }
 
 ALLOWED_ORIGINS = [
     "http://localhost:5173",
@@ -108,6 +257,14 @@ THEME_KEYWORDS = {
     "nature": ["雨", "雪", "云", "花", "叶", "江", "河", "雾", "海"],
 }
 
+SONG_TYPE_KEYWORDS = {
+    "narrative": ["那年", "后来", "曾经", "从小", "长大", "来到", "离开", "回到", "相逢", "告别"],
+    "lyrical": ["爱", "想念", "心", "温柔", "孤独", "寂寞", "泪", "拥抱", "遗憾", "思念"],
+    "imagery": ["月", "云", "风", "雨", "雪", "花", "海", "山", "星", "雾", "光", "梦"],
+    "performance": ["舞台", "灯光", "聚光灯", "掌声", "麦克风", "观众", "演唱", "乐队", "幕布"],
+    "duet": ["男：", "女：", "合：", "对唱", "你问", "我答", "你说", "我说", "我们"],
+}
+
 MIN_SEGMENT_LINES = 3
 IDEAL_SEGMENT_LINES = 4
 MAX_SEGMENT_LINES = 5
@@ -159,6 +316,20 @@ def detect_theme(text: str) -> str:
         if any(keyword in text for keyword in keywords):
             return theme
     return "neutral"
+
+
+def detect_song_type(valid_lyrics: List["LyricLine"]) -> str:
+    text = " ".join(line.text for line in valid_lyrics)
+    scores = {
+        song_type: sum(text.count(keyword) for keyword in keywords)
+        for song_type, keywords in SONG_TYPE_KEYWORDS.items()
+    }
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    if not ranked or ranked[0][1] < 2:
+        return "hybrid"
+    if len(ranked) > 1 and ranked[1][1] >= ranked[0][1] * 0.8:
+        return "hybrid"
+    return ranked[0][0]
 
 
 def median_gap(lyrics: List["LyricLine"]) -> float:
@@ -290,7 +461,7 @@ def build_visual_lock_text(visual_lock: Optional["VisualLockConfig"] = None) -> 
     if visual_lock.main_subject:
         parts.append(f"main subject: {visual_lock.main_subject.strip()}")
     if visual_lock.wardrobe:
-        parts.append(f"wardrobe and appearance: {visual_lock.wardrobe.strip()}")
+        parts.append(f"identity signature and allowed life-stage changes: {visual_lock.wardrobe.strip()}")
     if visual_lock.setting:
         parts.append(f"fixed world and setting: {visual_lock.setting.strip()}")
     if visual_lock.palette:
@@ -306,7 +477,7 @@ def build_visual_lock_text(visual_lock: Optional["VisualLockConfig"] = None) -> 
     return (
         "User visual continuity lock. Treat these as higher priority than automatic lyric interpretation: "
         + "; ".join(parts)
-        + ". Keep identity, costume, world, palette, and symbols consistent across every shot."
+        + ". Keep identity, world, palette, and symbols consistent; age, hairstyle and wardrobe may only change through an explicit character stage."
     )
 
 
@@ -452,50 +623,79 @@ def get_scene_arc(index: int, total: int) -> dict:
     else:
         shot_type = "wide closing shot with strong silhouette"
         camera_motion = "slow pull back"
-        transition = "fade out"
+        transition = "cut"
     return {**arc, "shot_type": shot_type, "camera_motion": camera_motion, "transition": transition}
 
 
-def build_smart_scene_groups(valid_lyrics: List["LyricLine"]) -> List[List["LyricLine"]]:
-    """把整首歌稳定分成每镜约 3-5 行，优先在停顿和完整句后切分。"""
+def build_smart_scene_groups(
+    valid_lyrics: List["LyricLine"],
+    duration: Optional[float] = None,
+    target_seconds: float = 8.0,
+    min_seconds: float = 6.0,
+    max_seconds: float = 10.0,
+    music_energy: Optional[List["MusicEnergyPoint"]] = None,
+) -> List[dict]:
+    """Build 6-10 second cloud-video windows and keep every lyric timestamp unchanged."""
     if not valid_lyrics:
         return []
-    target_count = max(1, min(25, round(len(valid_lyrics) / 4)))
-    groups: List[List["LyricLine"]] = []
-    cursor = 0
+    song_duration = max(float(duration or 0), valid_lyrics[-1].time + 1, 1)
+    min_seconds = max(1.0, float(min_seconds))
+    max_seconds = max(min_seconds, float(max_seconds))
+    min_count = max(1, int((song_duration + max_seconds - 0.001) // max_seconds))
+    max_count = max(min_count, int(song_duration // min_seconds) or 1)
+    target_count = round(song_duration / max(min_seconds, min(max_seconds, target_seconds)))
+    if song_duration >= 240:
+        target_count = max(30, min(50, target_count))
+    target_count = max(min_count, min(max_count, target_count))
 
-    for group_index in range(target_count):
-        remaining = len(valid_lyrics) - cursor
-        remaining_groups = target_count - group_index
-        if remaining_groups == 1:
-            groups.append(valid_lyrics[cursor:])
-            break
+    boundaries = [song_duration * index / target_count for index in range(target_count + 1)]
+    lyric_times = [line.time for line in valid_lyrics if 0 < line.time < song_duration]
+    energy_points = music_energy or []
+    energy_peaks = [
+        float(point.time)
+        for index, point in enumerate(energy_points)
+        if 0 < point.time < song_duration
+        and point.value >= 0.58
+        and point.value >= (energy_points[index - 1].value if index > 0 else 0)
+        and point.value >= (energy_points[index + 1].value if index + 1 < len(energy_points) else 0)
+    ]
+    for index in range(1, len(boundaries) - 1):
+        original = boundaries[index]
+        nearest_energy = min(energy_peaks, key=lambda value: abs(value - original), default=original)
+        nearest_lyric = min(lyric_times, key=lambda value: abs(value - original), default=original)
+        nearest = nearest_energy if abs(nearest_energy - original) <= 1.0 else nearest_lyric
+        previous = boundaries[index - 1]
+        following = boundaries[index + 1]
+        if (
+            abs(nearest - original) <= 1.25
+            and nearest - previous >= min_seconds
+            and following - nearest >= min_seconds
+            and nearest - previous <= max_seconds
+            and following - nearest <= max_seconds
+        ):
+            boundaries[index] = nearest
 
-        ideal = max(1, min(5, round(remaining / remaining_groups)))
-        min_size = max(1, remaining - 5 * (remaining_groups - 1))
-        max_size = min(5, remaining - max(1, 3 * (remaining_groups - 1)))
-        if max_size < min_size:
-            max_size = min_size
-
-        best_size = min(max(ideal, min_size), max_size)
-        best_score = float("-inf")
-        for size in range(min_size, max_size + 1):
-            boundary = cursor + size
-            if boundary >= len(valid_lyrics):
-                continue
-            left = valid_lyrics[boundary - 1]
-            right = valid_lyrics[boundary]
-            gap = max(0.0, right.time - left.time)
-            completeness = 0.7 if line_looks_complete(left.text) else 0.0
-            score = gap + completeness - abs(size - ideal) * 0.35
-            if score > best_score:
-                best_score = score
-                best_size = size
-
-        groups.append(valid_lyrics[cursor : cursor + best_size])
-        cursor += best_size
-
-    return [group for group in groups if group]
+    groups: List[dict] = []
+    for index in range(target_count):
+        start_time = round(boundaries[index], 3)
+        end_time = round(boundaries[index + 1], 3)
+        lines = [
+            line
+            for line in valid_lyrics
+            if line.time >= start_time and (line.time < end_time or (index == target_count - 1 and line.time <= end_time))
+        ]
+        previous_line = next((line for line in reversed(valid_lyrics) if line.time < start_time), None)
+        next_line = next((line for line in valid_lyrics if line.time >= end_time), None)
+        context_lines = lines or [line for line in (previous_line, next_line) if line]
+        groups.append({
+            "group_index": index,
+            "start_time": start_time,
+            "end_time": end_time,
+            "lyric_ids": [line.id for line in lines],
+            "lyrics": [line.text for line in lines],
+            "context_lyrics": [line.text for line in context_lines],
+        })
+    return groups
 
 
 def stable_seed(value: str) -> int:
@@ -570,53 +770,49 @@ def get_placeholder_url(seed: int, config: Optional["ImageProviderConfig"] = Non
 
 
 async def download_image_to_cache(url: str, file_path: Path, headers: Optional[dict[str, str]] = None) -> str:
+    partial_path = file_path.with_suffix(file_path.suffix + ".part")
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-        async with client.stream("GET", url, headers=headers) as response:
-            response.raise_for_status()
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            size = 0
-            with file_path.open("wb") as target:
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > 40 * 1024 * 1024:
-                        target.close()
-                        file_path.unlink(missing_ok=True)
-                        raise RuntimeError("图片超过 40MB 下载限制")
-                    target.write(chunk)
+        try:
+            async with client.stream("GET", url, headers=headers) as response:
+                response.raise_for_status()
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                size = 0
+                with partial_path.open("wb") as target:
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > 40 * 1024 * 1024:
+                            raise RuntimeError("图片超过 40MB 下载限制")
+                        target.write(chunk)
+            partial_path.replace(file_path)
+        except Exception:
+            partial_path.unlink(missing_ok=True)
+            raise
     return get_public_image_url(file_path)
 
 
 async def download_video_to_cache(url: str, file_path: Path, headers: Optional[dict[str, str]] = None) -> str:
+    partial_path = file_path.with_suffix(file_path.suffix + ".part")
     async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
-        async with client.stream("GET", url, headers=headers) as response:
-            response.raise_for_status()
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            size = 0
-            with file_path.open("wb") as target:
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > 1024 * 1024 * 1024:
-                        target.close()
-                        file_path.unlink(missing_ok=True)
-                        raise RuntimeError("视频超过 1GB 下载限制")
-                    target.write(chunk)
+        try:
+            async with client.stream("GET", url, headers=headers) as response:
+                response.raise_for_status()
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                size = 0
+                with partial_path.open("wb") as target:
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > 1024 * 1024 * 1024:
+                            raise RuntimeError("视频超过 1GB 下载限制")
+                        target.write(chunk)
+            partial_path.replace(file_path)
+        except Exception:
+            partial_path.unlink(missing_ok=True)
+            raise
     return get_public_video_url(file_path)
 
 
 async def image_source_to_data_uri(image_url: str) -> str:
-    if image_url.startswith("data:image/"):
-        return image_url
-
-    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-        response = await client.get(image_url)
-        response.raise_for_status()
-        if len(response.content) > 40 * 1024 * 1024:
-            raise RuntimeError("参考图片超过 40MB 限制")
-        content_type = response.headers.get("content-type", "image/jpeg").split(";")[0]
-        if not content_type.startswith("image/"):
-            content_type = "image/jpeg"
-        encoded = base64.b64encode(response.content).decode("utf-8")
-        return f"data:{content_type};base64,{encoded}"
+    return await image_to_data_uri(image_url)
 
 
 async def get_runway_prompt_image(image_url: str) -> str:
@@ -708,6 +904,7 @@ async def generate_provider_image(
     cache_key: str,
     config: Optional["ImageProviderConfig"] = None,
     reference_image: str = "",
+    reference_images: Optional[List[str]] = None,
 ) -> Optional[str]:
     provider_config = get_image_provider_config(config)
 
@@ -726,6 +923,7 @@ async def generate_provider_image(
             base_url=(provider_config.base_url or "https://dashscope.aliyuncs.com/api/v1").strip(),
             size=provider_config.size,
             reference_image=reference_image,
+            reference_images=reference_images or [],
             public_url_for_path=get_public_image_url,
         )
     if provider_config.provider in {"openai", "custom"}:
@@ -832,12 +1030,26 @@ class LLMProviderConfig(BaseModel):
 
 
 class VideoProviderConfig(BaseModel):
-    provider: str = "local_motion"
-    model: str = "ken-burns"
+    provider: str = "kling"
+    model: str = "kling-v2-5-turbo"
     api_key: Optional[str] = ""
     base_url: Optional[str] = ""
     motion_strength: str = "standard"
     clip_seconds: float = 6.0
+
+
+class GenerationPolicyConfig(BaseModel):
+    mode: str = "cloud_all"
+    target_scene_seconds: float = 8.0
+    min_scene_seconds: float = 6.0
+    max_scene_seconds: float = 10.0
+    require_test_batch: bool = True
+    prompt_version: int = 1
+
+
+class MusicEnergyPoint(BaseModel):
+    time: float
+    value: float = Field(ge=0, le=1)
 
 
 class VisualLockConfig(BaseModel):
@@ -865,8 +1077,11 @@ class LyricScenesRequest(BaseModel):
     duration: Optional[float] = 240.0
     song_name: Optional[str] = ""
     image_provider: Optional[ImageProviderConfig] = None
+    video_provider: Optional[VideoProviderConfig] = None
     llm_provider: Optional[LLMProviderConfig] = None
     visual_lock: Optional[VisualLockConfig] = None
+    generation_policy: Optional[GenerationPolicyConfig] = None
+    music_energy: List[MusicEnergyPoint] = Field(default_factory=list)
 
 
 class GenerateImageRequest(BaseModel):
@@ -875,6 +1090,7 @@ class GenerateImageRequest(BaseModel):
     lyric_id: Optional[str] = None
     character_id: Optional[str] = ""
     anchor_image: Optional[str] = ""
+    reference_images: List[str] = Field(default_factory=list)
     image_provider: Optional[ImageProviderConfig] = None
     visual_lock: Optional[VisualLockConfig] = None
 
@@ -891,6 +1107,8 @@ class GenerateVideoRequest(BaseModel):
     scene_index: Optional[int] = 0
     duration: Optional[float] = 6.0
     camera_motion: Optional[str] = ""
+    last_frame_url: Optional[str] = ""
+    style_fingerprint: Optional[str] = ""
     video_provider: Optional[VideoProviderConfig] = None
 
 
@@ -914,6 +1132,19 @@ class BatchGenerateRequest(BaseModel):
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "message": "Backend is running"}
+
+
+@app.get("/api/video/tasks")
+async def list_video_tasks():
+    tasks = load_video_tasks()
+    return {
+        "tasks": [
+            {"cache_key": cache_key, **task}
+            for cache_key, task in sorted(
+                tasks.items(), key=lambda item: float(item[1].get("updated_at", 0)), reverse=True
+            )
+        ][:500]
+    }
 
 
 @app.post("/api/lyrics/parse")
@@ -1053,7 +1284,8 @@ async def analyze_director(request: LyricScenesRequest):
         }
 
     director_analysis = build_director_analysis(valid_lyrics, request.style, request.song_name or "")
-    scene_groups = build_smart_scene_groups(valid_lyrics)
+    duration = request.duration or max(valid_lyrics[-1].time + 4, 30)
+    scene_groups = build_smart_scene_groups(valid_lyrics, duration)
     return {
         "director_analysis": director_analysis,
         "summary": f"已分析 {len(valid_lyrics)} 行有效歌词，建议生成 {len(scene_groups)} 个智能镜头",
@@ -1082,9 +1314,20 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
         fallback_duration = max(valid_lyrics[-1].time + 4, 30)
         duration = request.duration or fallback_duration
         duration = max(duration, valid_lyrics[-1].time + 1)
-        director_analysis = build_director_analysis(valid_lyrics, request.style, request.song_name or "")
-        visual_bible = build_visual_bible(valid_lyrics, request.style, request.song_name or "", request.visual_lock)
-        scene_groups = build_smart_scene_groups(valid_lyrics)
+        policy = request.generation_policy or GenerationPolicyConfig()
+        fallback_style = "cinematic" if request.style == "auto" else request.style
+        director_analysis = build_director_analysis(valid_lyrics, fallback_style, request.song_name or "")
+        fallback_visual_bible_text = build_visual_bible(
+            valid_lyrics, fallback_style, request.song_name or "", request.visual_lock
+        )
+        scene_groups = build_smart_scene_groups(
+            valid_lyrics,
+            duration,
+            policy.target_scene_seconds,
+            policy.min_scene_seconds,
+            policy.max_scene_seconds,
+            request.music_energy,
+        )
         llm_result: Optional[dict] = None
         llm_error = ""
         llm_config = request.llm_provider or LLMProviderConfig()
@@ -1096,10 +1339,7 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
                         {"id": line.id, "time": line.time, "text": line.text}
                         for line in valid_lyrics
                     ],
-                    groups=[
-                        [{"id": line.id, "time": line.time, "text": line.text} for line in group]
-                        for group in scene_groups
-                    ],
+                    groups=scene_groups,
                     style=request.style,
                     song_name=request.song_name or "",
                     visual_lock=request.visual_lock.model_dump() if request.visual_lock else None,
@@ -1110,9 +1350,11 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
                 director_analysis = {
                     **director_analysis,
                     "summary": llm_result.get("summary") or director_analysis["summary"],
-                    "palette": llm_result.get("palette") or [],
-                    "negative_prompt": llm_result.get("negative_prompt") or "",
+                    "palette": llm_result.get("visual_bible", {}).get("palette") or [],
+                    "negative_prompt": llm_result.get("visual_bible", {}).get("negative_prompt") or "",
                     "characters": llm_result.get("characters") or {},
+                    "locations": llm_result.get("locations") or {},
+                    "hero_props": llm_result.get("hero_props") or {},
                     "source": "deepseek",
                 }
             except Exception as error:
@@ -1128,29 +1370,97 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
                     "wardrobe": request.visual_lock.wardrobe or "",
                     "anchor_prompt": build_visual_lock_text(request.visual_lock),
                     "anchor_image": "",
+                    "identity_prompt": build_visual_lock_text(request.visual_lock),
+                    "identity_anchor_image": "",
+                    "immutable_traits": [request.visual_lock.main_subject],
+                    "stages": {
+                        "default": {
+                            "id": "default",
+                            "name": "默认阶段",
+                            "age_range": "",
+                            "appearance": request.visual_lock.main_subject,
+                            "hairstyle": "",
+                            "wardrobe": request.visual_lock.wardrobe or "",
+                            "temperament": "",
+                            "anchor_prompt": build_visual_lock_text(request.visual_lock),
+                            "anchor_image": "",
+                            "version": 1,
+                        }
+                    },
                 }
             director_analysis["characters"] = fallback_characters
         director_analysis.setdefault("source", "rules")
         llm_scenes = llm_result.get("scenes", []) if llm_result else []
+        selected_style = str((llm_result or {}).get("selected_style") or fallback_style)
+        if request.style != "auto":
+            selected_style = request.style
+        visual_bible_data = (llm_result or {}).get("visual_bible") or {
+            "media": selected_style,
+            "linework": "coherent linework across every shot",
+            "character_rendering": "consistent character proportions and facial construction",
+            "palette": director_analysis.get("palette") or [],
+            "lighting": "coherent cinematic lighting",
+            "era": "consistent world and period",
+            "texture": fallback_visual_bible_text,
+            "negative_prompt": (
+                "blood, gore, horror, costume change, face change, deformed hands, extra limbs, "
+                "text, subtitles, logo, watermark"
+            ),
+        }
+        visual_fingerprint_payload = {
+            "style": selected_style,
+            "visual_bible": visual_bible_data,
+            "image_provider": (request.image_provider or ImageProviderConfig()).provider,
+            "image_model": (request.image_provider or ImageProviderConfig()).model,
+            "image_size": (request.image_provider or ImageProviderConfig()).size,
+            "image_quality": (request.image_provider or ImageProviderConfig()).quality,
+            "video_provider": (request.video_provider or VideoProviderConfig()).provider,
+            "video_model": (request.video_provider or VideoProviderConfig()).model,
+            "aspect_ratio": "16:9",
+            "prompt_version": policy.prompt_version,
+        }
+        visual_fingerprint = hashlib.sha256(
+            json.dumps(visual_fingerprint_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:24]
+        visual_bible_data = {
+            **visual_bible_data,
+            "version": policy.prompt_version,
+            "fingerprint": visual_fingerprint,
+            "selected_style": selected_style,
+            "image_provider": visual_fingerprint_payload["image_provider"],
+            "image_model": visual_fingerprint_payload["image_model"],
+            "video_provider": visual_fingerprint_payload["video_provider"],
+            "video_model": visual_fingerprint_payload["video_model"],
+            "aspect_ratio": "16:9",
+            "quality_mode": visual_fingerprint_payload["image_quality"],
+            "prompt_version": policy.prompt_version,
+            "locations": director_analysis.get("locations") or {},
+            "hero_props": director_analysis.get("hero_props") or {},
+        }
         scenes = []
 
         for index, group in enumerate(scene_groups):
-            combined_text = "，".join(line.text.strip() for line in group if line.text.strip())
-            start_time = 0.0 if index == 0 else group[0].time
-            next_time = scene_groups[index + 1][0].time if index < len(scene_groups) - 1 else duration
-            end_time = max(start_time + 0.8, next_time)
+            combined_text = "，".join(group.get("lyrics") or group.get("context_lyrics") or [])
+            start_time = float(group["start_time"])
+            end_time = float(group["end_time"])
             arc = get_scene_arc(index, len(scene_groups))
             ai_scene = llm_scenes[index] if index < len(llm_scenes) else {}
             prompt = ai_scene.get("image_prompt") or (
-                f"{arc['mood']}，{arc['shot_type']}，画面表现：{combined_text[:180]}。"
-                f"整曲连续性设定：{visual_bible}。无字幕，无文字，无 logo，无水印。"
+                f"{arc['mood']}，{arc['shot_type']}，诗意画面表现：{combined_text[:180]}。"
+                f"整曲视觉圣经：{fallback_visual_bible_text}。"
+                "避免血腥和恐怖直译，无字幕，无文字，无 logo，无水印。"
             )
             video_prompt = ai_scene.get("video_prompt") or (
-                f"{arc['camera_motion']}, subtle cinematic motion, keep character and costume unchanged"
+                f"{arc['camera_motion']}, controlled 2D animation, subtle continuous motion, "
+                "keep face, costume, linework, palette and props unchanged, no morphing"
             )
             character_id = str(ai_scene.get("character_id") or "")
             if character_id not in director_analysis.get("characters", {}):
                 character_id = ""
+            character_stage_id = str(ai_scene.get("character_stage_id") or "")
+            stages = director_analysis.get("characters", {}).get(character_id, {}).get("stages", {})
+            if character_stage_id not in stages:
+                character_stage_id = next(iter(stages), "")
 
             scenes.append({
                 "scene_index": index,
@@ -1161,7 +1471,10 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
                 "imagery": ai_scene.get("imagery") or [director_analysis["visual_motif"]],
                 "visual": director_analysis["visual_motif"],
                 "character_id": character_id,
-                "shot_type": arc["shot_type"],
+                "character_stage_id": character_stage_id,
+                "location_id": str(ai_scene.get("location_id") or ""),
+                "hero_prop_ids": ai_scene.get("hero_prop_ids") or [],
+                "shot_type": ai_scene.get("shot_type") or arc["shot_type"],
                 "camera_motion": ai_scene.get("camera_motion") or arc["camera_motion"],
                 "transition": ai_scene.get("transition") or arc["transition"],
                 "video_prompt": video_prompt,
@@ -1169,11 +1482,21 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
                 "image_prompt": prompt,
                 "start_time": start_time,
                 "end_time": end_time,
-                "lyric_ids": [line.id for line in group],
+                "lyric_ids": group.get("lyric_ids") or [],
                 "image_url": "",
                 "image_path": "",
                 "video_path": "",
                 "anchor_image": "",
+                "first_frame": "",
+                "last_frame": "",
+                "requested_duration": round(end_time - start_time, 3),
+                "rendered_duration": 0,
+                "video_provider": "",
+                "video_model": "",
+                "provider_task_id": "",
+                "style_fingerprint": visual_fingerprint,
+                "quality_status": "pending",
+                "quality_errors": [],
                 "image_status": "idle",
                 "video_status": "idle",
                 "generation_status": "idle",
@@ -1184,12 +1507,17 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
         analysis = {
             "total_scenes": len(scenes),
             "valid_lyrics": len(valid_lyrics),
-            "style": request.style,
+            "style": selected_style,
+            "resolved_style": selected_style,
+            "song_type": (llm_result or {}).get("song_type") or detect_song_type(valid_lyrics),
+            "sections": (llm_result or {}).get("sections") or [],
+            "emotion_curve": (llm_result or {}).get("emotion_curve") or [],
+            "visual_bible": visual_bible_data,
             "director_analysis": director_analysis,
             "characters": director_analysis.get("characters", {}),
             "summary": (
-                f"已生成 {len(scenes)} 个待确认分镜，覆盖 {len(valid_lyrics)} 行歌词；"
-                "尚未调用任何收费图片接口"
+                f"已生成 {len(scenes)} 个 6-10 秒全云端候选镜头，覆盖 {len(valid_lyrics)} 行歌词；"
+                "尚未调用任何收费图片或视频接口"
                 + (f"；DeepSeek 不可用已回退规则分析：{llm_error[:120]}" if llm_error else "")
             ),
         }
@@ -1356,7 +1684,8 @@ async def generate_image(request: GenerateImageRequest):
         provider_config = get_image_provider_config(request.image_provider)
         cache_key = (
             f"single-{request.scene_index}-{request.lyric_id or ''}-"
-            f"{request.character_id or ''}-{request.anchor_image or ''}-{prompt}"
+            f"{request.character_id or ''}-{request.anchor_image or ''}-"
+            f"{'|'.join(request.reference_images)}-{prompt}"
         )
         if provider_config.provider == "placeholder":
             image_url = get_placeholder_url(seed, provider_config)
@@ -1366,6 +1695,7 @@ async def generate_image(request: GenerateImageRequest):
                 cache_key,
                 provider_config,
                 request.anchor_image or "",
+                request.reference_images,
             )
             if not image_url:
                 raise RuntimeError(f"{provider_config.provider} 未返回图片")
@@ -1393,7 +1723,7 @@ def get_runway_model(model: str) -> str:
 
 
 def get_runway_duration(duration: float) -> int:
-    return 5 if duration <= 7.5 else 10
+    return 5 if duration <= 5.0 else 10
 
 
 def get_luma_model(model: str) -> str:
@@ -1409,7 +1739,7 @@ def get_luma_model(model: str) -> str:
 
 
 def get_luma_duration(duration: float) -> str:
-    return "5s" if duration <= 7.5 else "9s"
+    return "5s" if duration <= 5.0 else "9s"
 
 
 def is_public_https_url(url: str) -> bool:
@@ -1472,7 +1802,7 @@ def get_kling_model(model: str) -> str:
 
 
 def get_kling_duration(duration: float) -> str:
-    return "5" if duration <= 7.5 else "10"
+    return "5" if duration <= 5.0 else "10"
 
 
 async def get_kling_image_source(image_url: str) -> str:
@@ -1488,17 +1818,22 @@ async def generate_runway_video(request: GenerateVideoRequest, provider_config: 
         raise HTTPException(status_code=400, detail="Runway 需要 API key")
 
     cache_key = stable_file_stem(
-        f"runway-{request.scene_index}-{request.image_url}-{request.prompt}-{provider_config.model}-{duration}"
+        f"runway-{request.scene_index}-{request.image_url}-{request.last_frame_url}-{request.prompt}-"
+        f"{provider_config.model}-{duration}-{request.style_fingerprint}"
     )
     file_path = GENERATED_VIDEO_DIR / f"{cache_key}.mp4"
     if file_path.exists() and file_path.stat().st_size > 0:
-        return {
-            "video_url": get_public_video_url(file_path),
-            "scene_index": request.scene_index,
-            "provider": "runway",
-            "status": "done",
-            "cached": True,
-        }
+        cached_task = get_resumable_video_task(cache_key, "runway") or {}
+        return completed_video_payload(
+            video_url=get_public_video_url(file_path),
+            scene_index=request.scene_index or 0,
+            provider="runway",
+            task_id=str(cached_task.get("task_id") or ""),
+            file_path=file_path,
+            rendered_duration=float(get_runway_duration(duration)),
+            requested_duration=duration,
+            cached=True,
+        )
 
     base_url = (provider_config.base_url or "").strip() or "https://api.dev.runwayml.com/v1"
     base_url = base_url.rstrip("/")
@@ -1517,21 +1852,28 @@ async def generate_runway_video(request: GenerateVideoRequest, provider_config: 
     }
 
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-        try:
-            create_response = await client.post(f"{base_url}/image_to_video", json=payload, headers=headers)
-            create_response.raise_for_status()
-            create_data = create_response.json()
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(
-                status_code=exc.response.status_code,
-                detail=f"Runway 创建任务失败：{exc.response.text[:400]}",
-            ) from exc
-
-        task_id = create_data.get("id")
-        if not task_id:
-            raise HTTPException(status_code=502, detail="Runway 未返回任务 id")
-
-        task_data = create_data
+        resumable = get_resumable_video_task(cache_key, "runway")
+        task_id = str(resumable.get("task_id")) if resumable and resumable.get("task_id") else ""
+        if task_id:
+            task_response = await client.get(f"{base_url}/tasks/{task_id}", headers=headers)
+            task_response.raise_for_status()
+            task_data = task_response.json()
+        else:
+            try:
+                create_response = await client.post(f"{base_url}/image_to_video", json=payload, headers=headers)
+                create_response.raise_for_status()
+                task_data = create_response.json()
+            except httpx.HTTPStatusError as exc:
+                raise HTTPException(
+                    status_code=exc.response.status_code,
+                    detail=f"Runway 创建任务失败：{exc.response.text[:400]}",
+                ) from exc
+            task_id = str(task_data.get("id") or "")
+            if not task_id:
+                raise HTTPException(status_code=502, detail="Runway 未返回任务 id")
+            await save_video_task(cache_key, {
+                "provider": "runway", "task_id": task_id, "status": "pending", "scene_index": request.scene_index
+            })
         for _ in range(120):
             status = str(task_data.get("status", "")).upper()
             if status in {"SUCCEEDED", "SUCCESS", "COMPLETED"}:
@@ -1540,16 +1882,20 @@ async def generate_runway_video(request: GenerateVideoRequest, provider_config: 
                     raise HTTPException(status_code=502, detail="Runway 任务成功但未返回 output")
                 video_url = output[0]
                 local_video_url = await download_video_to_cache(video_url, file_path)
-                return {
-                    "video_url": local_video_url,
-                    "scene_index": request.scene_index,
-                    "provider": "runway",
-                    "status": "done",
-                    "task_id": task_id,
-                }
+                await save_video_task(cache_key, {"status": "done", "local_video_url": local_video_url})
+                return completed_video_payload(
+                    video_url=local_video_url,
+                    scene_index=request.scene_index or 0,
+                    provider="runway",
+                    task_id=task_id,
+                    file_path=file_path,
+                    rendered_duration=float(get_runway_duration(duration)),
+                    requested_duration=duration,
+                )
 
             if status in {"FAILED", "CANCELLED", "CANCELED"}:
                 failure = task_data.get("failure") or task_data.get("error") or task_data
+                await save_video_task(cache_key, {"status": "failed", "error": str(failure)[:1000]})
                 raise HTTPException(status_code=502, detail=f"Runway 任务失败：{failure}")
 
             await asyncio.sleep(5)
@@ -1580,17 +1926,22 @@ async def generate_luma_video(request: GenerateVideoRequest, provider_config: Vi
         )
 
     cache_key = stable_file_stem(
-        f"luma-{request.scene_index}-{prompt_image_url}-{request.prompt}-{provider_config.model}-{duration}"
+        f"luma-{request.scene_index}-{prompt_image_url}-{request.last_frame_url}-{request.prompt}-"
+        f"{provider_config.model}-{duration}-{request.style_fingerprint}"
     )
     file_path = GENERATED_VIDEO_DIR / f"{cache_key}.mp4"
     if file_path.exists() and file_path.stat().st_size > 0:
-        return {
-            "video_url": get_public_video_url(file_path),
-            "scene_index": request.scene_index,
-            "provider": "luma",
-            "status": "done",
-            "cached": True,
-        }
+        cached_task = get_resumable_video_task(cache_key, "luma") or {}
+        return completed_video_payload(
+            video_url=get_public_video_url(file_path),
+            scene_index=request.scene_index or 0,
+            provider="luma",
+            task_id=str(cached_task.get("task_id") or ""),
+            file_path=file_path,
+            rendered_duration=float(get_luma_duration(duration).rstrip("s")),
+            requested_duration=duration,
+            cached=True,
+        )
 
     base_url = (provider_config.base_url or "").strip() or "https://api.lumalabs.ai/dream-machine/v1"
     base_url = base_url.rstrip("/")
@@ -1610,21 +1961,34 @@ async def generate_luma_video(request: GenerateVideoRequest, provider_config: Vi
             }
         },
     }
+    if request.last_frame_url:
+        public_last_frame = get_luma_public_image_url(request.last_frame_url)
+        if is_public_https_url(public_last_frame):
+            payload["keyframes"]["frame1"] = {"type": "image", "url": public_last_frame}
 
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-        try:
-            create_response = await client.post(f"{base_url}/generations", json=payload, headers=headers)
-            create_response.raise_for_status()
-            generation_data = create_response.json()
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(
-                status_code=exc.response.status_code,
-                detail=f"Luma 创建任务失败：{exc.response.text[:400]}",
-            ) from exc
-
-        generation_id = generation_data.get("id")
-        if not generation_id:
-            raise HTTPException(status_code=502, detail="Luma 未返回 generation id")
+        resumable = get_resumable_video_task(cache_key, "luma")
+        generation_id = str(resumable.get("task_id")) if resumable and resumable.get("task_id") else ""
+        if generation_id:
+            generation_response = await client.get(f"{base_url}/generations/{generation_id}", headers=headers)
+            generation_response.raise_for_status()
+            generation_data = generation_response.json()
+        else:
+            try:
+                create_response = await client.post(f"{base_url}/generations", json=payload, headers=headers)
+                create_response.raise_for_status()
+                generation_data = create_response.json()
+            except httpx.HTTPStatusError as exc:
+                raise HTTPException(
+                    status_code=exc.response.status_code,
+                    detail=f"Luma 创建任务失败：{exc.response.text[:400]}",
+                ) from exc
+            generation_id = str(generation_data.get("id") or "")
+            if not generation_id:
+                raise HTTPException(status_code=502, detail="Luma 未返回 generation id")
+            await save_video_task(cache_key, {
+                "provider": "luma", "task_id": generation_id, "status": "pending", "scene_index": request.scene_index
+            })
 
         for _ in range(120):
             state = str(generation_data.get("state", "")).lower()
@@ -1634,16 +1998,20 @@ async def generate_luma_video(request: GenerateVideoRequest, provider_config: Vi
                 if not video_url:
                     raise HTTPException(status_code=502, detail="Luma 任务成功但未返回 assets.video")
                 local_video_url = await download_video_to_cache(video_url, file_path)
-                return {
-                    "video_url": local_video_url,
-                    "scene_index": request.scene_index,
-                    "provider": "luma",
-                    "status": "done",
-                    "task_id": generation_id,
-                }
+                await save_video_task(cache_key, {"status": "done", "local_video_url": local_video_url})
+                return completed_video_payload(
+                    video_url=local_video_url,
+                    scene_index=request.scene_index or 0,
+                    provider="luma",
+                    task_id=generation_id,
+                    file_path=file_path,
+                    rendered_duration=float(get_luma_duration(duration).rstrip("s")),
+                    requested_duration=duration,
+                )
 
             if state in {"failed", "failure", "canceled", "cancelled"}:
                 failure = generation_data.get("failure_reason") or generation_data.get("error") or generation_data
+                await save_video_task(cache_key, {"status": "failed", "error": str(failure)[:1000]})
                 raise HTTPException(status_code=502, detail=f"Luma 任务失败：{failure}")
 
             await asyncio.sleep(5)
@@ -1663,17 +2031,22 @@ async def generate_luma_video(request: GenerateVideoRequest, provider_config: Vi
 async def generate_kling_video(request: GenerateVideoRequest, provider_config: VideoProviderConfig, duration: float):
     token = get_kling_auth_token(provider_config)
     cache_key = stable_file_stem(
-        f"kling-{request.scene_index}-{request.image_url}-{request.prompt}-{provider_config.model}-{duration}"
+        f"kling-{request.scene_index}-{request.image_url}-{request.last_frame_url}-{request.prompt}-"
+        f"{provider_config.model}-{duration}-{request.style_fingerprint}"
     )
     file_path = GENERATED_VIDEO_DIR / f"{cache_key}.mp4"
     if file_path.exists() and file_path.stat().st_size > 0:
-        return {
-            "video_url": get_public_video_url(file_path),
-            "scene_index": request.scene_index,
-            "provider": "kling",
-            "status": "done",
-            "cached": True,
-        }
+        cached_task = get_resumable_video_task(cache_key, "kling") or {}
+        return completed_video_payload(
+            video_url=get_public_video_url(file_path),
+            scene_index=request.scene_index or 0,
+            provider="kling",
+            task_id=str(cached_task.get("task_id") or ""),
+            file_path=file_path,
+            rendered_duration=float(get_kling_duration(duration)),
+            requested_duration=duration,
+            cached=True,
+        )
 
     base_url = (provider_config.base_url or "").strip() or "https://api-singapore.klingai.com/v1"
     base_url = base_url.rstrip("/")
@@ -1689,26 +2062,35 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
         "mode": "std",
         "cfg_scale": 0.5,
     }
+    if request.last_frame_url:
+        payload["image_tail"] = await get_kling_image_source(request.last_frame_url)
 
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-        try:
-            create_response = await client.post(f"{base_url}/videos/image2video", json=payload, headers=headers)
-            create_response.raise_for_status()
-            create_data = create_response.json()
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(
-                status_code=exc.response.status_code,
-                detail=f"Kling 创建任务失败：{exc.response.text[:400]}",
-            ) from exc
-
-        data = create_data.get("data") if isinstance(create_data, dict) else None
-        task_id = data.get("task_id") if isinstance(data, dict) else None
-        if not task_id and isinstance(create_data, dict):
-            task_id = create_data.get("task_id")
-        if not task_id:
-            raise HTTPException(status_code=502, detail="Kling 未返回 task_id")
-
-        task_data = data if isinstance(data, dict) else create_data
+        resumable = get_resumable_video_task(cache_key, "kling")
+        task_id = str(resumable.get("task_id")) if resumable and resumable.get("task_id") else ""
+        if task_id:
+            task_response = await client.get(f"{base_url}/videos/image2video/{task_id}", headers=headers)
+            task_response.raise_for_status()
+            query_data = task_response.json()
+            task_data = query_data.get("data") if isinstance(query_data, dict) and isinstance(query_data.get("data"), dict) else query_data
+        else:
+            try:
+                create_response = await client.post(f"{base_url}/videos/image2video", json=payload, headers=headers)
+                create_response.raise_for_status()
+                create_data = create_response.json()
+            except httpx.HTTPStatusError as exc:
+                raise HTTPException(
+                    status_code=exc.response.status_code,
+                    detail=f"Kling 创建任务失败：{exc.response.text[:400]}",
+                ) from exc
+            data = create_data.get("data") if isinstance(create_data, dict) else None
+            task_id = str(data.get("task_id") if isinstance(data, dict) else create_data.get("task_id") or "")
+            if not task_id:
+                raise HTTPException(status_code=502, detail="Kling 未返回 task_id")
+            task_data = data if isinstance(data, dict) else create_data
+            await save_video_task(cache_key, {
+                "provider": "kling", "task_id": task_id, "status": "pending", "scene_index": request.scene_index
+            })
         for _ in range(120):
             status = str(task_data.get("task_status") or task_data.get("status") or "").lower()
             if status in {"succeed", "succeeded", "success", "completed"}:
@@ -1720,16 +2102,20 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
                 if not video_url:
                     raise HTTPException(status_code=502, detail="Kling 任务成功但未返回视频 URL")
                 local_video_url = await download_video_to_cache(video_url, file_path)
-                return {
-                    "video_url": local_video_url,
-                    "scene_index": request.scene_index,
-                    "provider": "kling",
-                    "status": "done",
-                    "task_id": task_id,
-                }
+                await save_video_task(cache_key, {"status": "done", "local_video_url": local_video_url})
+                return completed_video_payload(
+                    video_url=local_video_url,
+                    scene_index=request.scene_index or 0,
+                    provider="kling",
+                    task_id=task_id,
+                    file_path=file_path,
+                    rendered_duration=float(get_kling_duration(duration)),
+                    requested_duration=duration,
+                )
 
             if status in {"failed", "failure", "canceled", "cancelled"}:
                 reason = task_data.get("task_status_msg") or task_data.get("error") or task_data
+                await save_video_task(cache_key, {"status": "failed", "error": str(reason)[:1000]})
                 raise HTTPException(status_code=502, detail=f"Kling 任务失败：{reason}")
 
             await asyncio.sleep(5)
@@ -1770,6 +2156,24 @@ async def generate_video(request: GenerateVideoRequest):
         if not provider_config.base_url:
             raise HTTPException(status_code=400, detail="自定义视频模型需要填写 Base URL")
 
+        cache_key = stable_file_stem(
+            f"custom-{request.scene_index}-{request.image_url}-{request.last_frame_url}-{request.prompt}-"
+            f"{provider_config.model}-{duration}-{request.style_fingerprint}"
+        )
+        file_path = GENERATED_VIDEO_DIR / f"{cache_key}.mp4"
+        if file_path.exists() and file_path.stat().st_size > 0:
+            cached_task = get_resumable_video_task(cache_key, "custom") or {}
+            return completed_video_payload(
+                video_url=get_public_video_url(file_path),
+                scene_index=request.scene_index or 0,
+                provider="custom",
+                task_id=str(cached_task.get("task_id") or ""),
+                file_path=file_path,
+                rendered_duration=duration,
+                requested_duration=duration,
+                cached=True,
+            )
+
         headers = {"Content-Type": "application/json"}
         if provider_config.api_key:
             headers["Authorization"] = f"Bearer {provider_config.api_key}"
@@ -1778,6 +2182,8 @@ async def generate_video(request: GenerateVideoRequest):
             "model": provider_config.model,
             "prompt": request.prompt,
             "image_url": request.image_url,
+            "last_frame_url": request.last_frame_url,
+            "style_fingerprint": request.style_fingerprint,
             "duration": duration,
             "camera_motion": request.camera_motion,
             "scene_index": request.scene_index,
@@ -1806,14 +2212,26 @@ async def generate_video(request: GenerateVideoRequest):
         )
         if not video_url:
             raise HTTPException(status_code=502, detail="自定义视频模型未返回 video_url")
-
-        return {
-            "video_url": video_url,
-            "scene_index": request.scene_index,
-            "provider": provider,
+        task_id = str(data.get("task_id") or data.get("id") or "") if isinstance(data, dict) else ""
+        local_video_url = await download_video_to_cache(str(video_url), file_path)
+        await save_video_task(cache_key, {
+            "provider": "custom",
+            "task_id": task_id,
             "status": "done",
-            "raw": data,
-        }
+            "scene_index": request.scene_index,
+            "local_video_url": local_video_url,
+        })
+        result = completed_video_payload(
+            video_url=local_video_url,
+            scene_index=request.scene_index or 0,
+            provider="custom",
+            task_id=task_id,
+            file_path=file_path,
+            rendered_duration=duration,
+            requested_duration=duration,
+        )
+        result["raw"] = data
+        return result
 
     if provider == "runway":
         return await generate_runway_video(request, provider_config, duration)

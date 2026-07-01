@@ -21,6 +21,9 @@ export interface Scene {
   mood?: string
   imagery?: string[]
   character_id?: string
+  character_stage_id?: string
+  location_id?: string
+  hero_prop_ids?: string[]
   visual?: string
   shot_type?: string
   camera_motion?: string
@@ -35,6 +38,16 @@ export interface Scene {
   image_path?: string
   video_path?: string
   anchor_image?: string
+  first_frame?: string
+  last_frame?: string
+  requested_duration?: number
+  rendered_duration?: number
+  video_provider?: string
+  video_model?: string
+  provider_task_id?: string
+  style_fingerprint?: string
+  quality_status?: QualityStatus
+  quality_errors?: string[]
   generation_status?: GenerationStatus
   error?: string
   reuse_from?: number | null
@@ -45,12 +58,73 @@ export interface Scene {
   video_error?: string
 }
 
+export interface CharacterStageProfile {
+  id: string
+  name: string
+  age_range?: string
+  appearance?: string
+  hairstyle?: string
+  wardrobe?: string
+  temperament?: string
+  anchor_prompt: string
+  anchor_image?: string
+  version?: number
+}
+
 export interface CharacterProfile {
   name: string
   description?: string
   wardrobe?: string
   anchor_prompt: string
   anchor_image?: string
+  identity_prompt?: string
+  identity_anchor_image?: string
+  immutable_traits?: string[]
+  stages?: Record<string, CharacterStageProfile>
+}
+
+export interface VisualReferenceProfile {
+  media?: string
+  linework?: string
+  character_rendering?: string
+  palette?: string[]
+  lighting?: string
+  era?: string
+  texture?: string
+  negative_prompt?: string
+  reference_images?: string[]
+}
+
+export interface VisualBible extends VisualReferenceProfile {
+  version: number
+  fingerprint: string
+  selected_style: string
+  image_provider?: string
+  image_model?: string
+  video_provider?: string
+  video_model?: string
+  aspect_ratio?: string
+  quality_mode?: string
+  prompt_version?: number
+  locations?: Record<string, { name: string; description: string; anchor_image?: string }>
+  hero_props?: Record<string, { name: string; description: string; anchor_image?: string }>
+}
+
+export interface GenerationPolicy {
+  mode: 'cloud_all'
+  target_scene_seconds: number
+  min_scene_seconds: number
+  max_scene_seconds: number
+  require_test_batch: boolean
+  test_scene_indexes: number[]
+  test_approved: boolean
+  provider_locked: boolean
+  image_provider?: string
+  image_model?: string
+  video_provider?: string
+  video_model?: string
+  style_fingerprint?: string
+  prompt_version: number
 }
 
 export interface StoryAnalysis {
@@ -60,11 +134,17 @@ export interface StoryAnalysis {
   summary: string
   director_analysis?: Record<string, unknown>
   characters?: Record<string, CharacterProfile>
+  song_type?: 'narrative' | 'lyrical' | 'imagery' | 'performance' | 'duet' | 'hybrid'
+  sections?: Array<{ name: string; start_time: number; end_time: number; mood?: string }>
+  emotion_curve?: Array<{ time: number; value: number; label?: string }>
+  resolved_style?: string
+  visual_bible?: VisualBible
 }
 
 export type ImageProvider = 'tongyi' | 'pollinations' | 'openai' | 'custom' | 'placeholder'
 export type VideoProvider = 'local_motion' | 'kling' | 'runway' | 'luma' | 'custom' | 'none'
 export type GenerationStatus = 'idle' | 'queued' | 'generating' | 'done' | 'error'
+export type QualityStatus = 'pending' | 'checking' | 'needs_review' | 'approved' | 'rejected'
 export type GenerationLogType = 'storyboard' | 'image' | 'video' | 'export'
 export type GenerationLogStatus = 'success' | 'error' | 'canceled'
 export type ProjectAssetType = 'image' | 'video' | 'prompt'
@@ -146,7 +226,7 @@ export interface ModelTemplate {
 }
 
 export interface Project {
-  schemaVersion: 2
+  schemaVersion: 3
   id: string
   name: string
   projectFilePath?: string
@@ -161,6 +241,10 @@ export interface Project {
   generationLogs?: GenerationLog[]
   assets?: ProjectAsset[]
   visualLock?: VisualLockSettings
+  visualBible?: VisualBible
+  generationPolicy: GenerationPolicy
+  styleMode: 'auto' | 'manual'
+  resolvedStyle?: string
   style: string
   createdAt: Date
 }
@@ -197,7 +281,7 @@ interface AppState {
 }
 
 const defaultProject: Project = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   id: Date.now().toString(),
   name: '未命名项目',
   lyrics: [],
@@ -205,7 +289,19 @@ const defaultProject: Project = {
   generationLogs: [],
   assets: [],
   visualLock: { enabled: false },
-  style: 'cinematic',
+  generationPolicy: {
+    mode: 'cloud_all',
+    target_scene_seconds: 8,
+    min_scene_seconds: 6,
+    max_scene_seconds: 10,
+    require_test_batch: true,
+    test_scene_indexes: [],
+    test_approved: false,
+    provider_locked: false,
+    prompt_version: 1,
+  },
+  styleMode: 'auto',
+  style: 'auto',
   createdAt: new Date(),
 }
 
@@ -226,8 +322,8 @@ const defaultImageSettings: ImageGenerationSettings = {
 }
 
 const defaultVideoSettings: VideoGenerationSettings = {
-  provider: 'local_motion',
-  model: 'ken-burns',
+  provider: 'kling',
+  model: 'kling-v2-5-turbo',
   apiKey: '',
   baseUrl: '',
   motionStrength: 'standard',
@@ -275,12 +371,12 @@ export const defaultModelTemplates: ModelTemplate[] = [
   },
   {
     id: 'video-local-motion',
-    name: '本地 Ken Burns 动态',
+    name: '本地动态（仅旧工程预览）',
     kind: 'video',
     provider: 'local_motion',
     model: 'ken-burns',
     requiresKey: false,
-    description: '免费本地镜头运动，导出时用 ffmpeg 生成推拉横移效果。',
+    description: '仅用于兼容旧工程，不能作为全云端正式成片镜头。',
   },
   {
     id: 'video-runway',
@@ -305,7 +401,7 @@ export const defaultModelTemplates: ModelTemplate[] = [
     name: 'Kling 图生视频',
     kind: 'video',
     provider: 'kling',
-    model: 'kling-v1-6',
+    model: 'kling-v2-5-turbo',
     requiresKey: true,
     description: '支持 Token 或 AccessKey:SecretKey，适合中文古风画面。',
   },
@@ -342,7 +438,20 @@ export const useAppStore = create<AppState>((set) => ({
       project: { ...state.project, scenes, analysis },
     })),
   setStyle: (style) =>
-    set((state) => ({ project: { ...state.project, style } })),
+    set((state) => ({
+      project: {
+        ...state.project,
+        style,
+        styleMode: style === 'auto' ? 'auto' : 'manual',
+        resolvedStyle: style === 'auto' ? undefined : style,
+        generationPolicy: {
+          ...state.project.generationPolicy,
+          test_approved: false,
+          provider_locked: false,
+          style_fingerprint: undefined,
+        },
+      },
+    })),
   setImageSettings: (settings) =>
     set((state) => ({ imageSettings: { ...state.imageSettings, ...settings } })),
   setDirectorSettings: (settings) =>

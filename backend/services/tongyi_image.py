@@ -81,6 +81,7 @@ async def generate_tongyi_image(
     base_url: str = DEFAULT_BASE_URL,
     size: str = "1280x720",
     reference_image: str = "",
+    reference_images: list[str] | None = None,
     public_url_for_path: Callable[[Path], str],
 ) -> str:
     global _last_submit_time
@@ -96,8 +97,14 @@ async def generate_tongyi_image(
         "n": 1,
         "size": normalize_size(size),
     }
-    if reference_image:
-        content.append({"image": await image_to_data_uri(reference_image)})
+    references: list[str] = []
+    for source in [reference_image, *(reference_images or [])]:
+        if source and source not in references:
+            references.append(source)
+    references = references[:4]
+    if references:
+        for source in references:
+            content.append({"image": await image_to_data_uri(source)})
     else:
         parameters.update({"enable_interleave": True, "max_images": 1})
     payload = {

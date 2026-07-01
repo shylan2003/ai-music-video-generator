@@ -15,6 +15,7 @@ import {
   CopyOutlined,
   EyeOutlined,
   LockOutlined,
+  CheckOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
 import { apiClient } from '@/api/client'
@@ -24,6 +25,7 @@ import { useAppStore, type GenerationLog, type GenerationStatus, type ImageGener
 const { Text, Title } = Typography
 
 const styleColors: Record<string, string> = {
+  auto: '#a78bfa',
   cinematic: '#4fc3f7',
   ornate_gufeng: '#fbbf24',
   song_landscape: '#a7f3d0',
@@ -154,7 +156,7 @@ const getVisualLockText = (visualLock?: VisualLockSettings) => {
 
   const parts = [
     visualLock.mainSubject ? `main subject: ${visualLock.mainSubject}` : '',
-    visualLock.wardrobe ? `wardrobe and appearance: ${visualLock.wardrobe}` : '',
+    visualLock.wardrobe ? `identity signature and allowed life-stage changes: ${visualLock.wardrobe}` : '',
     visualLock.setting ? `fixed setting: ${visualLock.setting}` : '',
     visualLock.palette ? `locked palette and lighting: ${visualLock.palette}` : '',
     visualLock.symbols ? `recurring symbols: ${visualLock.symbols}` : '',
@@ -190,17 +192,49 @@ const toBackendImageProvider = (settings: ImageGenerationSettings) => ({
   quality: settings.quality,
 })
 
-const confirmPaidImageQueue = (count: number) =>
+const confirmPaidImageQueue = (sceneCount: number, referenceCount = 0) =>
   new Promise<boolean>((resolve) => {
     Modal.confirm({
       title: '确认生成关键帧',
-      content: `将提交 ${count} 个分镜的图片任务，并可能额外生成角色定妆照。云端平台可能收费。`,
+      content: `将提交 ${sceneCount} 张分镜关键帧${referenceCount > 0 ? `，并先生成 ${referenceCount} 张身份、阶段、地点或道具参考图` : ''}，合计约 ${sceneCount + referenceCount} 个图片任务。云端平台可能收费。`,
       okText: '确认生成',
       cancelText: '取消',
       onOk: () => resolve(true),
       onCancel: () => resolve(false),
     })
   })
+
+const confirmPaidVideoQueue = (count: number, seconds: number, isTest: boolean) =>
+  new Promise<boolean>((resolve) => {
+    Modal.confirm({
+      title: isTest ? '确认生成三镜测试' : '确认生成全部云端镜头',
+      content: `将使用同一云端模型提交 ${count} 个视频任务，总请求时长约 ${Math.ceil(seconds)} 秒。平台可能产生较高费用。`,
+      okText: isTest ? '生成测试片' : '确认批量生成',
+      cancelText: '取消',
+      onOk: () => resolve(true),
+      onCancel: () => resolve(false),
+    })
+  })
+
+const getTestSceneIndexes = (scenes: Scene[]) => {
+  if (scenes.length <= 3) return scenes.map((scene) => scene.scene_index)
+  const pick = (pattern: RegExp) => scenes.find((scene) => pattern.test(scene.shot_type || ''))?.scene_index
+  const candidates = [
+    pick(/close|detail/i),
+    pick(/medium|full/i),
+    pick(/wide|establish|environment/i),
+    scenes[Math.floor(scenes.length / 2)]?.scene_index,
+    scenes[scenes.length - 1]?.scene_index,
+  ]
+  return Array.from(new Set(candidates.filter((value): value is number => typeof value === 'number'))).slice(0, 3)
+}
+
+const getProviderLock = (
+  imageSettings: ImageGenerationSettings,
+  videoProvider: string,
+  videoModel: string,
+  styleFingerprint?: string
+) => `${imageSettings.provider}:${imageSettings.model}|${videoProvider}:${videoModel}|${styleFingerprint || 'no-style'}`
 
 interface Props {
   onSceneSelect: (scene: Scene) => void
@@ -538,78 +572,6 @@ const buildSegmentStoryboard = (
   }
 }
 
-const buildLyricAlignedScenes = (
-  lyrics: LyricLine[],
-  style: string,
-  duration: number,
-  songName: string,
-  visualLock?: VisualLockSettings
-): { scenes: Scene[]; analysis: StoryAnalysis } => {
-  const validLyrics = lyrics
-    .filter((line) => !line.skip && line.text.trim())
-    .sort((a, b) => a.time - b.time)
-
-  if (validLyrics.length === 0) {
-    return {
-      scenes: [],
-      analysis: {
-        total_scenes: 0,
-        valid_lyrics: 0,
-        style,
-        summary: '没有有效歌词，请先导入歌词',
-      },
-    }
-  }
-
-  const styleKeyword = styleKeywords[style] || styleKeywords.cinematic
-  const visualGroups = buildVisualGroups(validLyrics)
-  const effectiveDuration = Math.max(
-    duration || 0,
-    validLyrics[validLyrics.length - 1].time + 1,
-    30
-  )
-  const globalSummary = buildGlobalSummary(validLyrics)
-
-  const scenes = visualGroups.map((group, index) => {
-    const combinedText = group.map((line) => line.text.trim()).filter(Boolean).join('，')
-    const previousGroup = visualGroups[index - 1]
-    const previousText = previousGroup?.[previousGroup.length - 1]?.text || ''
-    const nextText = visualGroups[index + 1]?.[0]?.text || ''
-    const startTime = index === 0 ? 0 : group[0].time
-    const nextTime = visualGroups[index + 1]?.[0]?.time ?? effectiveDuration
-    const endTime = Math.max(startTime + 0.4, nextTime)
-    const groupKey = group.map((line) => `${line.id}:${line.text}`).join('|')
-    const seed = Math.abs(stringHash(`lyric-scene-${groupKey}-${style}-${index}`)) % 1000
-    const context = [
-      songName ? `song: '${songName.slice(0, 60)}'` : '',
-      previousText ? `previous lyric: '${previousText.slice(0, 60)}'` : '',
-      `current lyric group: '${combinedText.slice(0, 140)}'`,
-      nextText ? `next lyric: '${nextText.slice(0, 60)}'` : '',
-    ].filter(Boolean).join(', ')
-
-    return {
-      scene_index: index,
-      title: `歌词画面 ${index + 1}`,
-      description: combinedText,
-      prompt: appendVisualLock(`music video still frame, overall lyric theme: '${globalSummary}', ${context}, ${styleKeyword}, visualize this lyric group literally and emotionally, keep characters, setting, lighting, and color palette consistent with adjacent lyrics, no text overlay, high quality, 4k, 16:9 wide shot`, visualLock),
-      start_time: startTime,
-      end_time: endTime,
-      lyric_ids: group.map((line) => line.id),
-      image_url: `https://picsum.photos/seed/${seed}/1280/720`,
-    }
-  })
-
-  return {
-    scenes,
-    analysis: {
-      total_scenes: scenes.length,
-      valid_lyrics: validLyrics.length,
-      style,
-      summary: `已使用本地智能分镜生成 ${scenes.length} 个镜头，覆盖 ${validLyrics.length} 行歌词`,
-    },
-  }
-}
-
 const getProviderLabel = (provider: string) => {
   const labels: Record<string, string> = {
     placeholder: '占位图',
@@ -634,6 +596,49 @@ const formatMinutesRange = (minSeconds: number, maxSeconds: number) => {
   return minMinutes === maxMinutes ? `约 ${minMinutes} 分钟` : `约 ${minMinutes}-${maxMinutes} 分钟`
 }
 
+const analyzeMusicEnergy = async (source?: string) => {
+  if (!source || typeof AudioContext === 'undefined') return []
+  let audioContext: AudioContext | undefined
+  try {
+    const response = await fetch(source)
+    if (!response.ok) return []
+    audioContext = new AudioContext()
+    const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer())
+    const windowSeconds = 0.5
+    const windowSamples = Math.max(1, Math.floor(audioBuffer.sampleRate * windowSeconds))
+    const points: Array<{ time: number; value: number }> = []
+    for (let start = 0; start < audioBuffer.length; start += windowSamples) {
+      const end = Math.min(audioBuffer.length, start + windowSamples)
+      let squareSum = 0
+      let sampleCount = 0
+      const stride = 32
+      for (let channel = 0; channel < audioBuffer.numberOfChannels; channel += 1) {
+        const data = audioBuffer.getChannelData(channel)
+        for (let index = start; index < end; index += stride) {
+          squareSum += data[index] * data[index]
+          sampleCount += 1
+        }
+      }
+      points.push({
+        time: start / audioBuffer.sampleRate,
+        value: sampleCount ? Math.sqrt(squareSum / sampleCount) : 0,
+      })
+    }
+    const values = points.map((point) => point.value)
+    const floor = Math.min(...values)
+    const ceiling = Math.max(...values)
+    const range = Math.max(ceiling - floor, 0.000001)
+    return points.map((point) => ({
+      time: Number(point.time.toFixed(3)),
+      value: Number(((point.value - floor) / range).toFixed(4)),
+    }))
+  } catch {
+    return []
+  } finally {
+    await audioContext?.close().catch(() => undefined)
+  }
+}
+
 const getGenerationEstimate = (
   lyrics: LyricLine[],
   scenes: Scene[],
@@ -644,10 +649,17 @@ const getGenerationEstimate = (
   videoProvider: string
 ) => {
   const validLyrics = lyrics.filter((line) => !line.skip && line.text.trim())
+  const songDuration = Math.max(duration || validLyrics[validLyrics.length - 1]?.time || 240, 1)
+  const cloudTarget = Math.max(
+    Math.ceil(songDuration / 10),
+    Math.min(Math.floor(songDuration / 5), songDuration >= 240
+      ? Math.max(30, Math.min(50, Math.round(songDuration / 8)))
+      : Math.max(1, Math.round(songDuration / 8)))
+  )
   const estimatedSceneCount =
     scenes.length > 0
       ? scenes.length
-      : buildLyricAlignedScenes(lyrics, style, duration || 240, songName || '').scenes.length
+      : cloudTarget
   const imageJobs = estimatedSceneCount
   const videoJobs = videoProvider === 'none' ? 0 : estimatedSceneCount
   const imagePaid = !['placeholder', 'pollinations'].includes(imageProvider)
@@ -677,7 +689,7 @@ const getGenerationEstimate = (
     timeText: formatMinutesRange(minSeconds, maxSeconds),
     costText:
       imagePaid || videoPaid
-        ? `可能产生平台费用：${imagePaid ? `${imageJobs} 张图片` : ''}${imagePaid && videoPaid ? ' + ' : ''}${videoPaid ? `${videoJobs} 段视频` : ''}`
+        ? `可能产生平台费用：${imagePaid ? `${imageJobs} 张图片` : ''}${imagePaid && videoPaid ? ' + ' : ''}${videoPaid ? `${videoJobs} 段视频 / 约 ${Math.ceil(songDuration)} 秒` : ''}`
         : '免费 / 本地处理',
   }
 }
@@ -713,6 +725,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
   const [splitAfterLyricId, setSplitAfterLyricId] = useState<string | null>(null)
   const [isLogDrawerOpen, setLogDrawerOpen] = useState(false)
   const [isAssetDrawerOpen, setAssetDrawerOpen] = useState(false)
+  const [assetDrawerTab, setAssetDrawerTab] = useState('contact-sheet')
   const [isVisualLockDrawerOpen, setVisualLockDrawerOpen] = useState(false)
   const [isImageQueueRunning, setImageQueueRunning] = useState(false)
   const [isVideoQueueRunning, setVideoQueueRunning] = useState(false)
@@ -804,9 +817,12 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
   }
 
   const applyStoryboardResult = (scenes: Scene[], analysis: StoryAnalysis) => {
+    const providerCompatibleScenes = videoSettings.provider === 'runway'
+      ? scenes.map((scene) => ({ ...scene, transition: 'cut' }))
+      : scenes
     const sceneMap: Record<string, number> = {}
 
-    scenes.forEach((scene) => {
+    providerCompatibleScenes.forEach((scene) => {
       scene.lyric_ids.forEach((id) => {
         sceneMap[id] = scene.scene_index
       })
@@ -818,8 +834,25 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
     }))
 
     setLyrics(updatedLyrics)
-    setScenes(scenes, analysis)
-    scenes.forEach((scene) => {
+    setScenes(providerCompatibleScenes, analysis)
+    setProject({
+      visualBible: analysis.visual_bible,
+      resolvedStyle: analysis.resolved_style || analysis.style,
+      generationPolicy: {
+        ...project.generationPolicy,
+        min_scene_seconds: 6,
+        max_scene_seconds: videoSettings.provider === 'luma' ? 9 : 10,
+        test_scene_indexes: [],
+        test_approved: false,
+        provider_locked: false,
+        image_provider: imageSettings.provider,
+        image_model: imageSettings.model,
+        video_provider: videoSettings.provider,
+        video_model: videoSettings.model,
+        style_fingerprint: analysis.visual_bible?.fingerprint,
+      },
+    })
+    providerCompatibleScenes.forEach((scene) => {
       if (scene.image_url) {
         recordSceneAsset(scene, 'image', {
           url: scene.image_url,
@@ -859,12 +892,25 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
             video_status: 'idle' as GenerationStatus,
             generation_error: undefined,
             video_url: undefined,
+            video_provider: undefined,
+            video_model: undefined,
+            provider_task_id: undefined,
+            quality_status: 'pending' as const,
+            quality_errors: [],
             video_error: undefined,
           }
         : scene
     )
 
     setScenes(updatedScenes, project.analysis)
+    setProject({
+      generationPolicy: {
+        ...project.generationPolicy,
+        test_approved: false,
+        provider_locked: false,
+        test_scene_indexes: [],
+      },
+    })
     setEditingSceneIndex(null)
     message.success('镜头设置已保存')
   }
@@ -880,6 +926,13 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
 
     if (!targetScene || !currentScene) {
       message.warning(direction === 'previous' ? '前面没有可合并的镜头' : '后面没有可合并的镜头')
+      return
+    }
+
+    const mergedDuration = Math.max(targetScene.end_time, currentScene.end_time)
+      - Math.min(targetScene.start_time, currentScene.start_time)
+    if (mergedDuration > project.generationPolicy.max_scene_seconds) {
+      message.warning(`全云端镜头最长 ${project.generationPolicy.max_scene_seconds} 秒，不能合并为 ${mergedDuration.toFixed(1)} 秒`)
       return
     }
 
@@ -988,25 +1041,28 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       return
     }
 
-    const localStoryboard = buildLyricAlignedScenes(
-      project.lyrics,
-      project.style,
-      project.duration || 240,
-      project.musicName || '',
-      project.visualLock
-    )
     const startedAt = Date.now()
 
     setGenerating(true)
     message.loading({ content: 'AI 导演正在分析歌词并生成智能分镜...', key: 'storyboard' })
 
     try {
+      const musicEnergy = await analyzeMusicEnergy(project.musicFile)
       const res = await apiClient.post('/api/generate/smart-storyboard', {
         lyrics: project.lyrics,
         style: project.style,
         duration: project.duration || 240,
         song_name: project.musicName || '',
+        music_energy: musicEnergy,
         image_provider: toBackendImageProvider(imageSettings),
+        video_provider: {
+          provider: videoSettings.provider,
+          model: videoSettings.model,
+          api_key: '',
+          base_url: '',
+          motion_strength: videoSettings.motionStrength,
+          clip_seconds: videoSettings.clipSeconds,
+        },
         llm_provider: {
           provider: directorSettings.provider,
           model: directorSettings.model,
@@ -1014,6 +1070,11 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
           base_url: directorSettings.baseUrl,
         },
         visual_lock: toBackendVisualLock(project.visualLock),
+        generation_policy: {
+          ...project.generationPolicy,
+          min_scene_seconds: 6,
+          max_scene_seconds: videoSettings.provider === 'luma' ? 9 : 10,
+        },
       })
 
       const { scenes, analysis } = res.data as {
@@ -1025,23 +1086,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
         throw new Error('invalid storyboard response')
       }
 
-      if (scenes.length === 0) {
-        applyStoryboardResult(localStoryboard.scenes, localStoryboard.analysis)
-        addGenerationLog({
-          type: 'storyboard',
-          status: 'success',
-          title: '本地智能分镜',
-          provider: 'local',
-          model: project.style,
-          message: `后端未返回分镜，已使用本地分镜生成 ${localStoryboard.scenes.length} 个镜头`,
-          durationMs: Date.now() - startedAt,
-        })
-        message.success({
-          content: `已切换为本地智能分镜，共 ${localStoryboard.scenes.length} 个镜头`,
-          key: 'storyboard',
-        })
-        return
-      }
+      if (scenes.length === 0) throw new Error(analysis.summary || '后端未返回全云端分镜')
 
       applyStoryboardResult(scenes, analysis)
       addGenerationLog({
@@ -1058,23 +1103,19 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
         key: 'storyboard',
       })
     } catch (error) {
-      applyStoryboardResult(localStoryboard.scenes, localStoryboard.analysis)
       addGenerationLog({
         type: 'storyboard',
         status: 'error',
         title: 'AI 智能分镜失败',
         provider: imageSettings.provider,
         model: imageSettings.model,
-        message: `已切换为本地分镜，生成 ${localStoryboard.scenes.length} 个镜头`,
+        message: '全云端分镜生成失败，未使用低密度本地分镜替代',
         error: getErrorMessage(error),
         durationMs: Date.now() - startedAt,
       })
 
-      const isMissingRoute = axios.isAxiosError(error) && error.response?.status === 404
-      message.warning({
-        content: isMissingRoute
-          ? '当前后端未提供智能分镜接口，已切换为本地分镜'
-          : '后端生成失败，已切换为本地智能分镜',
+      message.error({
+        content: `全云端分镜生成失败：${getErrorMessage(error)}`,
         key: 'storyboard',
       })
     } finally {
@@ -1184,16 +1225,67 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       return
     }
 
+    const targetedScenes = project.scenes.filter((scene) => targetIndexes.has(scene.scene_index))
+    const requiredCharacterIdsForEstimate = Array.from(new Set(
+      targetedScenes.map((scene) => scene.character_id).filter((value): value is string => Boolean(value))
+    ))
+    const characterReferenceJobs = requiredCharacterIdsForEstimate.reduce((total, characterId) => {
+      const character = project.analysis?.characters?.[characterId]
+      if (!character) return total
+      const identityJobs = character.identity_anchor_image || character.anchor_image ? 0 : 1
+      const stageIds = Array.from(new Set(
+        targetedScenes
+          .filter((scene) => scene.character_id === characterId)
+          .map((scene) => scene.character_stage_id || 'default')
+      ))
+      const stageJobs = stageIds.filter((stageId) => !character.stages?.[stageId]?.anchor_image).length
+      return total + identityJobs + stageJobs
+    }, 0)
+    const requiredLocationIds = Array.from(new Set(
+      targetedScenes.map((scene) => scene.location_id).filter((value): value is string => Boolean(value))
+    ))
+    const requiredPropIds = Array.from(new Set(
+      targetedScenes.flatMap((scene) => scene.hero_prop_ids ?? [])
+    ))
+    const environmentReferenceJobs = requiredLocationIds.filter(
+      (id) => !project.visualBible?.locations?.[id]?.anchor_image
+    ).length + requiredPropIds.filter(
+      (id) => !project.visualBible?.hero_props?.[id]?.anchor_image
+    ).length
+
     if (!['placeholder', 'pollinations'].includes(imageSettings.provider)) {
-      const confirmed = await confirmPaidImageQueue(targetIndexes.size)
+      const confirmed = await confirmPaidImageQueue(
+        targetIndexes.size,
+        characterReferenceJobs + environmentReferenceJobs
+      )
       if (!confirmed) return
     }
 
     imageQueueCancelRef.current = false
+    setProject({
+      generationPolicy: {
+        ...project.generationPolicy,
+        test_approved: false,
+        provider_locked: false,
+        test_scene_indexes: [],
+        image_provider: imageSettings.provider,
+        image_model: imageSettings.model,
+        video_provider: videoSettings.provider,
+        video_model: videoSettings.model,
+        style_fingerprint: project.visualBible?.fingerprint,
+      },
+    })
     setImageQueueRunning(true)
     let failedCount = 0
     let nextAnalysis = project.analysis
       ? { ...project.analysis, characters: { ...(project.analysis.characters ?? {}) } }
+      : undefined
+    let nextVisualBible = project.visualBible
+      ? {
+          ...project.visualBible,
+          locations: { ...(project.visualBible.locations ?? {}) },
+          hero_props: { ...(project.visualBible.hero_props ?? {}) },
+        }
       : undefined
     let nextScenes: Scene[] = reindexScenes([...project.scenes]).map((scene) =>
       targetIndexes.has(scene.scene_index)
@@ -1207,37 +1299,151 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
         .map((scene) => scene.character_id as string)
     ))
     for (const characterId of requiredCharacterIds) {
-      const character = nextAnalysis?.characters?.[characterId]
-      if (!character || character.anchor_image) continue
+      let character = nextAnalysis?.characters?.[characterId]
+      if (!character) continue
       try {
-        const anchorResponse = await apiClient.post('/api/generate/image', {
-          prompt: character.anchor_prompt,
-          scene_index: -1,
-          character_id: characterId,
-          image_provider: toBackendImageProvider(imageSettings),
-          visual_lock: toBackendVisualLock(project.visualLock),
-        })
+        let identityAnchor = character.identity_anchor_image || character.anchor_image || ''
+        if (!identityAnchor) {
+          const identityResponse = await apiClient.post('/api/generate/image', {
+            prompt: character.identity_prompt || character.anchor_prompt,
+            scene_index: -1000,
+            character_id: characterId,
+            reference_images: (nextVisualBible?.reference_images ?? []).slice(0, 1),
+            image_provider: toBackendImageProvider(imageSettings),
+            visual_lock: toBackendVisualLock(project.visualLock),
+          })
+          identityAnchor = identityResponse.data.image_url
+          character = {
+            ...character,
+            identity_anchor_image: identityAnchor,
+            anchor_image: identityAnchor,
+          }
+          addProjectAsset({
+            type: 'image',
+            title: `身份母版 · ${character.name || characterId}`,
+            url: identityAnchor,
+            prompt: character.identity_prompt || character.anchor_prompt,
+            provider: imageSettings.provider,
+            model: imageSettings.model,
+            source: 'queue',
+          })
+        }
+
+        const requiredStageIds = Array.from(new Set(
+          nextScenes
+            .filter((scene) => scene.character_id === characterId && targetIndexes.has(scene.scene_index))
+            .map((scene) => scene.character_stage_id || 'default')
+        ))
+        const stages = { ...(character.stages ?? {}) }
+        for (const stageId of requiredStageIds) {
+          const stage = stages[stageId] || {
+            id: stageId,
+            name: stageId === 'default' ? '默认阶段' : stageId,
+            anchor_prompt: character.anchor_prompt,
+            version: 1,
+          }
+          if (stage.anchor_image) continue
+          const stageResponse = await apiClient.post('/api/generate/image', {
+            prompt: `${stage.anchor_prompt}. Preserve the exact identity and facial construction from the identity reference.`,
+            scene_index: -1100 - requiredStageIds.indexOf(stageId),
+            character_id: `${characterId}:${stageId}`,
+            anchor_image: identityAnchor,
+            reference_images: [identityAnchor, ...(nextVisualBible?.reference_images ?? []).slice(0, 1)],
+            image_provider: toBackendImageProvider(imageSettings),
+            visual_lock: toBackendVisualLock(project.visualLock),
+          })
+          stages[stageId] = { ...stage, anchor_image: stageResponse.data.image_url }
+          addProjectAsset({
+            type: 'image',
+            title: `阶段定妆 · ${character.name || characterId} · ${stage.name}`,
+            url: stageResponse.data.image_url,
+            prompt: stage.anchor_prompt,
+            provider: imageSettings.provider,
+            model: imageSettings.model,
+            source: 'queue',
+          })
+        }
+        character = { ...character, stages }
         nextAnalysis = {
           ...nextAnalysis!,
           characters: {
             ...nextAnalysis!.characters,
-            [characterId]: { ...character, anchor_image: anchorResponse.data.image_url },
+            [characterId]: character,
+          },
+        }
+      } catch (error) {
+        setImageQueueRunning(false)
+        message.error(`角色身份或阶段定妆生成失败：${getErrorMessage(error)}`)
+        return
+      }
+    }
+
+    const visualReferenceImages = nextVisualBible?.reference_images ?? []
+    try {
+      for (const locationId of requiredLocationIds) {
+        const location = nextVisualBible?.locations?.[locationId]
+        if (!location || location.anchor_image) continue
+        const response = await apiClient.post('/api/generate/image', {
+          prompt: `Environment reference sheet for ${location.name}. ${location.description}. No people, no text. Preserve the project visual bible, architecture, geography, palette and lighting for later scene consistency.`,
+          scene_index: -2000 - requiredLocationIds.indexOf(locationId),
+          reference_images: visualReferenceImages.slice(0, 1),
+          image_provider: toBackendImageProvider(imageSettings),
+          visual_lock: toBackendVisualLock(project.visualLock),
+        })
+        nextVisualBible = {
+          ...nextVisualBible!,
+          locations: {
+            ...nextVisualBible!.locations,
+            [locationId]: { ...location, anchor_image: response.data.image_url },
           },
         }
         addProjectAsset({
           type: 'image',
-          title: `角色定妆照 · ${character.name || characterId}`,
-          url: anchorResponse.data.image_url,
-          prompt: character.anchor_prompt,
+          title: `地点参考 · ${location.name}`,
+          url: response.data.image_url,
+          prompt: location.description,
           provider: imageSettings.provider,
           model: imageSettings.model,
           source: 'queue',
         })
-      } catch (error) {
-        setImageQueueRunning(false)
-        message.error(`角色定妆照生成失败：${getErrorMessage(error)}`)
-        return
       }
+
+      for (const propId of requiredPropIds) {
+        const prop = nextVisualBible?.hero_props?.[propId]
+        if (!prop || prop.anchor_image) continue
+        const response = await apiClient.post('/api/generate/image', {
+          prompt: `Hero prop reference sheet for ${prop.name}. ${prop.description}. Isolated object, consistent structure and recognizable construction, no people, no text. Preserve the project visual bible and allow only story-appropriate age or wear changes.`,
+          scene_index: -3000 - requiredPropIds.indexOf(propId),
+          reference_images: visualReferenceImages.slice(0, 1),
+          image_provider: toBackendImageProvider(imageSettings),
+          visual_lock: toBackendVisualLock(project.visualLock),
+        })
+        nextVisualBible = {
+          ...nextVisualBible!,
+          hero_props: {
+            ...nextVisualBible!.hero_props,
+            [propId]: { ...prop, anchor_image: response.data.image_url },
+          },
+        }
+        addProjectAsset({
+          type: 'image',
+          title: `道具参考 · ${prop.name}`,
+          url: response.data.image_url,
+          prompt: prop.description,
+          provider: imageSettings.provider,
+          model: imageSettings.model,
+          source: 'queue',
+        })
+      }
+    } catch (error) {
+      setImageQueueRunning(false)
+      message.error(`地点或道具参考图生成失败：${getErrorMessage(error)}`)
+      return
+    }
+
+    if (nextVisualBible) {
+      nextAnalysis = nextAnalysis ? { ...nextAnalysis, visual_bible: nextVisualBible } : nextAnalysis
+      setProject({ visualBible: nextVisualBible })
     }
 
     setScenes(nextScenes, nextAnalysis)
@@ -1259,13 +1465,26 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       try {
         const controller = new AbortController()
         imageQueueAbortRef.current = controller
+        const character = scene.character_id ? nextAnalysis?.characters?.[scene.character_id] : undefined
+        const stageAnchor = scene.character_stage_id
+          ? character?.stages?.[scene.character_stage_id]?.anchor_image
+          : character?.anchor_image
+        const locationAnchor = scene.location_id
+          ? nextVisualBible?.locations?.[scene.location_id]?.anchor_image
+          : undefined
+        const propAnchors = (scene.hero_prop_ids ?? [])
+          .map((propId) => nextVisualBible?.hero_props?.[propId]?.anchor_image)
+          .filter((value): value is string => Boolean(value))
+        const styleReference = nextVisualBible?.reference_images?.[0]
+        const referenceImages = [stageAnchor, styleReference, locationAnchor, ...propAnchors]
+          .filter((value): value is string => Boolean(value))
+          .slice(0, 4)
         const res = await apiClient.post('/api/generate/image', {
           prompt: scene.prompt,
           scene_index: scene.scene_index,
           character_id: scene.character_id || '',
-          anchor_image: scene.character_id
-            ? nextAnalysis?.characters?.[scene.character_id]?.anchor_image || ''
-            : '',
+          anchor_image: stageAnchor || '',
+          reference_images: referenceImages,
           image_provider: toBackendImageProvider(imageSettings),
           visual_lock: toBackendVisualLock(project.visualLock),
         }, { signal: controller.signal })
@@ -1296,10 +1515,16 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
             ? {
                 ...item,
                 image_url: res.data.image_url,
+                first_frame: res.data.image_url,
                 image_status: 'done' as GenerationStatus,
                 generation_error: undefined,
                 video_url: undefined,
                 video_status: 'idle' as GenerationStatus,
+                video_provider: undefined,
+                video_model: undefined,
+                provider_task_id: undefined,
+                quality_status: 'pending',
+                quality_errors: [],
                 video_error: undefined,
               }
             : item
@@ -1350,6 +1575,20 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
 
       setScenes(nextScenes, nextAnalysis)
     }
+
+    nextScenes = nextScenes.map((scene, index) => {
+      const following = nextScenes[index + 1]
+      const continuityMatch = Boolean(
+        following
+        && (scene.transition || '').toLowerCase().includes('match')
+        && scene.character_id === following.character_id
+        && scene.character_stage_id === following.character_stage_id
+        && scene.location_id === following.location_id
+        && following.first_frame
+      )
+      return continuityMatch ? { ...scene, last_frame: following.first_frame } : scene
+    })
+    setScenes(nextScenes, nextAnalysis)
 
     const wasCanceled = imageQueueCancelRef.current
     imageQueueCancelRef.current = false
@@ -1470,20 +1709,59 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
     }
   }
 
-  const runVideoQueue = async (mode: 'all' | 'failed' = 'all') => {
+  const runVideoQueue = async (
+    mode: 'all' | 'failed' = 'all',
+    explicitIndexes?: number[],
+    isTestBatch = false
+  ) => {
     if (project.scenes.length === 0) {
       message.warning('请先生成智能分镜')
       return
     }
 
-    if (videoSettings.provider === 'none') {
-      message.warning('当前已关闭视频模型')
+    if (['none', 'local_motion'].includes(videoSettings.provider)) {
+      message.warning('全云端模式必须选择 Kling、Runway、Luma 或自定义云端视频模型')
+      return
+    }
+
+    const styleFingerprint = project.visualBible?.fingerprint || project.analysis?.visual_bible?.fingerprint || ''
+    const currentLock = getProviderLock(
+      imageSettings,
+      videoSettings.provider,
+      videoSettings.model,
+      styleFingerprint
+    )
+    const policy = project.generationPolicy
+    const savedLock = getProviderLock(
+      {
+        ...imageSettings,
+        provider: (policy.image_provider || imageSettings.provider) as ImageGenerationSettings['provider'],
+        model: policy.image_model || imageSettings.model,
+      },
+      policy.video_provider || videoSettings.provider,
+      policy.video_model || videoSettings.model,
+      policy.style_fingerprint
+    )
+    if (policy.provider_locked && savedLock !== currentLock) {
+      message.error('项目已锁定生成模型或视觉圣经。请恢复原模型，或重新分镜建立新版本。')
+      return
+    }
+    if (!isTestBatch && mode === 'all' && policy.require_test_batch && !policy.test_approved) {
+      message.warning('请先生成并确认三镜测试，再批量生成全部云端镜头')
       return
     }
 
     const targetIndexes = new Set(
-      project.scenes
-        .filter((scene) => mode === 'all' || scene.video_status === 'error')
+      explicitIndexes ?? project.scenes
+        .filter((scene) => {
+          if (mode === 'failed') return scene.video_status === 'error' || scene.quality_status === 'rejected'
+          return !(
+            scene.video_status === 'done'
+            && scene.video_provider === videoSettings.provider
+            && scene.video_model === videoSettings.model
+            && scene.style_fingerprint === styleFingerprint
+          )
+        })
         .map((scene) => scene.scene_index)
     )
 
@@ -1492,15 +1770,39 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       return
     }
 
+    const targetSeconds = project.scenes
+      .filter((scene) => targetIndexes.has(scene.scene_index))
+      .reduce((total, scene) => total + Math.max(0.5, scene.end_time - scene.start_time), 0)
+    const confirmed = await confirmPaidVideoQueue(targetIndexes.size, targetSeconds, isTestBatch)
+    if (!confirmed) return
+
     videoQueueCancelRef.current = false
     setVideoQueueRunning(true)
     let failedCount = 0
     let nextScenes: Scene[] = reindexScenes([...project.scenes]).map((scene) =>
       targetIndexes.has(scene.scene_index)
-        ? { ...scene, video_status: 'queued' as GenerationStatus, video_error: undefined }
+        ? {
+            ...scene,
+            video_status: 'queued' as GenerationStatus,
+            video_error: undefined,
+            quality_status: 'pending' as const,
+            quality_errors: [],
+          }
         : scene
     )
 
+    setProject({
+      generationPolicy: {
+        ...policy,
+        test_scene_indexes: isTestBatch ? Array.from(targetIndexes) : policy.test_scene_indexes,
+        provider_locked: true,
+        image_provider: imageSettings.provider,
+        image_model: imageSettings.model,
+        video_provider: videoSettings.provider,
+        video_model: videoSettings.model,
+        style_fingerprint: styleFingerprint,
+      },
+    })
     setScenes(nextScenes, project.analysis)
     message.loading({ content: `视频队列已开始，共 ${targetIndexes.size} 个镜头`, key: 'video-queue' })
 
@@ -1548,6 +1850,8 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
           scene_index: scene.scene_index,
           duration: Math.max(0.5, scene.end_time - scene.start_time),
           camera_motion: scene.camera_motion || '',
+          last_frame_url: scene.last_frame || '',
+          style_fingerprint: styleFingerprint,
           video_provider: {
             provider: videoSettings.provider,
             model: videoSettings.model,
@@ -1579,12 +1883,36 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
           })
         }
 
+        if (res.data.quality_status === 'rejected') {
+          failedCount += 1
+          addGenerationLog({
+            type: 'video',
+            status: 'error',
+            title: `自动质检 ${scene.scene_index + 1}`,
+            provider: videoSettings.provider,
+            model: videoSettings.model,
+            sceneIndex: scene.scene_index,
+            sceneTitle: scene.title,
+            error: Array.isArray(res.data.quality_errors)
+              ? res.data.quality_errors.join('；')
+              : '自动质检未通过',
+            durationMs: Date.now() - sceneStartedAt,
+          })
+        }
+
         nextScenes = nextScenes.map((item) =>
           item.scene_index === scene.scene_index
             ? {
                 ...item,
                 video_url: res.data.video_url,
                 video_status: 'done' as GenerationStatus,
+                rendered_duration: Number(res.data.rendered_duration || scene.end_time - scene.start_time),
+                video_provider: videoSettings.provider,
+                video_model: videoSettings.model,
+                provider_task_id: res.data.task_id || '',
+                style_fingerprint: styleFingerprint,
+                quality_status: (res.data.quality_status || 'needs_review') as Scene['quality_status'],
+                quality_errors: Array.isArray(res.data.quality_errors) ? res.data.quality_errors : [],
                 video_error: undefined,
               }
             : item
@@ -1654,6 +1982,29 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       message.info({ content: '视频队列已取消', key: 'video-queue' })
     } else if (failedCount > 0) {
       message.warning({ content: `视频队列完成，${failedCount} 个镜头失败，可重试失败项`, key: 'video-queue' })
+    } else if (isTestBatch) {
+      Modal.confirm({
+        title: '三镜测试已生成',
+        content: '请检查人物近景、全身动作和环境镜头。确认后将锁定当前图片模型、视频模型和视觉圣经。',
+        okText: '测试通过并锁定',
+        cancelText: '暂不通过',
+        onOk: () => {
+          setProject({
+            generationPolicy: {
+              ...project.generationPolicy,
+              test_scene_indexes: Array.from(targetIndexes),
+              test_approved: true,
+              provider_locked: true,
+              image_provider: imageSettings.provider,
+              image_model: imageSettings.model,
+              video_provider: videoSettings.provider,
+              video_model: videoSettings.model,
+              style_fingerprint: styleFingerprint,
+            },
+          })
+          message.success('测试已确认，可以生成全部云端镜头')
+        },
+      })
     } else {
       message.success({ content: '视频队列已完成', key: 'video-queue' })
     }
@@ -1705,15 +2056,29 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
           ? {
               ...s,
               image_url: res.data.image_url,
+              first_frame: res.data.image_url,
               image_status: 'done' as GenerationStatus,
               generation_error: undefined,
               video_url: undefined,
               video_status: 'idle' as GenerationStatus,
+              video_provider: undefined,
+              video_model: undefined,
+              provider_task_id: undefined,
+              quality_status: 'pending' as const,
+              quality_errors: [],
               video_error: undefined,
             }
           : s
       )
       setScenes(updated, project.analysis)
+      setProject({
+        generationPolicy: {
+          ...project.generationPolicy,
+          test_approved: false,
+          provider_locked: false,
+          test_scene_indexes: [],
+        },
+      })
       message.success('场景图片已更新')
     } catch (error) {
       const errorMessage = getErrorMessage(error)
@@ -1734,6 +2099,33 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       })
       message.error('重新生成失败')
     }
+  }
+
+  const approveAllVideoQuality = () => {
+    const incomplete = project.scenes.filter(
+      (scene) => scene.video_status !== 'done' || !scene.video_url || scene.quality_status === 'rejected'
+    )
+    if (incomplete.length > 0) {
+      message.warning(`仍有 ${incomplete.length} 个镜头未完成或质检失败，不能整体确认`)
+      return
+    }
+    Modal.confirm({
+      title: '确认一致性接触表',
+      content: `请确认已检查 ${project.scenes.length} 个镜头中的人物身份与人生阶段、服装、地点、关键道具、肢体和画风连续性。确认后这些镜头将允许进入正式导出。`,
+      okText: '接触表确认通过',
+      cancelText: '继续检查',
+      onOk: () => {
+        setScenes(
+          project.scenes.map((scene) => ({
+            ...scene,
+            quality_status: 'approved' as const,
+            quality_errors: [],
+          })),
+          project.analysis
+        )
+        message.success('全部云端镜头已人工确认通过，可以正式导出')
+      },
+    })
   }
 
   return (
@@ -1773,10 +2165,13 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
         <Button
           size="small"
           icon={<AppstoreOutlined />}
-          onClick={() => setAssetDrawerOpen(true)}
+          onClick={() => {
+            setAssetDrawerTab('contact-sheet')
+            setAssetDrawerOpen(true)
+          }}
           style={{ borderRadius: 6, fontSize: 12 }}
         >
-          素材库{project.assets?.length ? ` ${project.assets.length}` : ''}
+          一致性接触表
         </Button>
         <Button
           size="small"
@@ -1807,13 +2202,28 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
         </Button>
         <Button
           size="small"
+          icon={<EyeOutlined />}
+          onClick={() => runVideoQueue('all', getTestSceneIndexes(project.scenes), true)}
+          disabled={
+            project.scenes.length === 0
+            || isGenerating
+            || isImageQueueRunning
+            || isVideoQueueRunning
+            || project.generationPolicy.test_approved
+          }
+          style={{ borderRadius: 6, fontSize: 12 }}
+        >
+          {project.generationPolicy.test_approved ? '三镜测试已通过' : '生成三镜测试'}
+        </Button>
+        <Button
+          size="small"
           icon={isVideoQueueRunning ? <StopOutlined /> : <VideoCameraOutlined />}
           danger={isVideoQueueRunning}
           onClick={isVideoQueueRunning ? handleCancelVideoQueue : () => runVideoQueue('all')}
           disabled={project.scenes.length === 0 || isGenerating || isImageQueueRunning}
           style={{ borderRadius: 6, fontSize: 12 }}
         >
-          {isVideoQueueRunning ? '取消视频' : '生成动态片段'}
+          {isVideoQueueRunning ? '取消视频' : '生成全部云端镜头'}
         </Button>
         <Button
           size="small"
@@ -1823,6 +2233,15 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
           style={{ borderRadius: 6, fontSize: 12 }}
         >
           重试失败视频
+        </Button>
+        <Button
+          size="small"
+          icon={<CheckOutlined />}
+          onClick={approveAllVideoQuality}
+          disabled={project.scenes.length === 0 || isVideoQueueRunning || isImageQueueRunning}
+          style={{ borderRadius: 6, fontSize: 12 }}
+        >
+          确认全部质检
         </Button>
         <Button
           type="primary"
@@ -2036,6 +2455,16 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
                         {videoStatusMeta[scene.video_status ?? 'idle'].label}
                       </Tag>
                     </Tooltip>
+                    {scene.video_status === 'done' && (
+                      <Tooltip title={(scene.quality_errors ?? []).join('；') || '视频质检状态'}>
+                        <Tag
+                          color={scene.quality_status === 'approved' ? 'success' : scene.quality_status === 'rejected' ? 'error' : 'warning'}
+                          style={{ fontSize: 10, margin: 0 }}
+                        >
+                          {scene.quality_status === 'approved' ? '质检通过' : scene.quality_status === 'rejected' ? '质检失败' : '待人工确认'}
+                        </Tag>
+                      </Tooltip>
+                    )}
                     <Tag style={{
                       fontSize: 10, margin: 0,
                       background: `${accent}22`,
@@ -2048,6 +2477,14 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
                   <Text style={{ color: 'var(--app-text-subtle)', fontSize: 11 }} ellipsis>
                     {scene.description}
                   </Text>
+                  {scene.character_id && (
+                    <Text style={{ color: '#a78bfa', fontSize: 10, display: 'block', marginTop: 4 }} ellipsis>
+                      {project.analysis?.characters?.[scene.character_id]?.name || scene.character_id}
+                      {scene.character_stage_id
+                        ? ` · ${project.analysis?.characters?.[scene.character_id]?.stages?.[scene.character_stage_id]?.name || scene.character_stage_id}`
+                        : ''}
+                    </Text>
+                  )}
                   {scene.camera_motion && (
                     <Text style={{ color: '#6f7785', fontSize: 10, display: 'block', marginTop: 6 }} ellipsis>
                       {scene.shot_type} · {scene.camera_motion}
@@ -2086,8 +2523,8 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
             <Input.TextArea rows={2} placeholder="例如：一位白衣琵琶女子，清冷、克制，始终作为画面核心" />
           </Form.Item>
 
-          <Form.Item label="服装 / 外观" name="wardrobe">
-            <Input.TextArea rows={2} placeholder="例如：银白披帛、浅青长裙、玉簪、无现代元素" />
+          <Form.Item label="跨阶段身份特征 / 服装变化规则" name="wardrobe">
+            <Input.TextArea rows={2} placeholder="例如：固定凤眼、左眼下小痣和同一把花纹琵琶；年龄、发式和服装可随人生阶段变化" />
           </Form.Item>
 
           <Form.Item label="固定世界 / 场景" name="setting">
@@ -2109,7 +2546,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       </Drawer>
 
       <Drawer
-        title="项目素材库"
+        title="一致性接触表与项目素材"
         open={isAssetDrawerOpen}
         width={760}
         onClose={() => setAssetDrawerOpen(false)}
@@ -2126,7 +2563,73 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
         }
       >
         <Tabs
+          activeKey={assetDrawerTab}
+          onChange={setAssetDrawerTab}
           items={[
+            {
+              key: 'contact-sheet',
+              label: `接触表 ${project.scenes.length}`,
+              children: project.scenes.length ? (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
+                  {project.scenes.map((scene) => (
+                    <div
+                      key={`contact-${scene.scene_index}`}
+                      onClick={() => {
+                        onSceneSelect(scene)
+                        setAssetDrawerOpen(false)
+                      }}
+                      style={{
+                        borderRadius: 8,
+                        overflow: 'hidden',
+                        background: 'var(--app-surface)',
+                        border: scene.quality_status === 'rejected'
+                          ? '1px solid #ff4d4f'
+                          : '1px solid var(--app-border)',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <div style={{ aspectRatio: '16/9', background: 'var(--app-surface-raised)' }}>
+                        {scene.image_url ? (
+                          <img
+                            src={scene.image_url}
+                            alt={scene.title}
+                            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                          />
+                        ) : (
+                          <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <Text type="secondary">无关键帧</Text>
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 7 }}>
+                        <Text style={{ color: 'var(--app-text)', fontSize: 13, fontWeight: 600 }} ellipsis>
+                          镜头 {scene.scene_index + 1} · {scene.title}
+                        </Text>
+                        <Space size={4} wrap>
+                          <Tag style={{ margin: 0 }}>{scene.character_id || '无人物'}</Tag>
+                          {scene.character_stage_id && <Tag color="purple" style={{ margin: 0 }}>{scene.character_stage_id}</Tag>}
+                          {scene.location_id && <Tag color="blue" style={{ margin: 0 }}>{scene.location_id}</Tag>}
+                          {(scene.hero_prop_ids ?? []).map((propId) => (
+                            <Tag color="gold" key={propId} style={{ margin: 0 }}>{propId}</Tag>
+                          ))}
+                        </Space>
+                        <Tag
+                          color={scene.quality_status === 'approved' ? 'green' : scene.quality_status === 'rejected' ? 'red' : 'orange'}
+                          style={{ margin: 0, width: 'fit-content' }}
+                        >
+                          {scene.quality_status || 'pending'}
+                        </Tag>
+                        {scene.quality_errors?.length ? (
+                          <Text type="danger" style={{ fontSize: 11 }}>{scene.quality_errors.join('；')}</Text>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无镜头" />
+              ),
+            },
             {
               key: 'images',
               label: `图片 ${imageAssets.length}`,
@@ -2404,6 +2907,38 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
               </Form.Item>
               <Form.Item label="转场" name="transition" style={{ flex: 1 }}>
                 <Select options={transitionOptions} />
+              </Form.Item>
+            </Space>
+
+            <Space size={10} style={{ width: '100%' }} align="start">
+              <Form.Item label="主要角色" name="character_id" style={{ flex: 1 }}>
+                <Select
+                  allowClear
+                  options={Object.entries(project.analysis?.characters ?? {}).map(([id, character]) => ({
+                    value: id,
+                    label: character.name || id,
+                  }))}
+                  onChange={(characterId) => {
+                    const firstStageId = Object.keys(project.analysis?.characters?.[characterId]?.stages ?? {})[0]
+                    editForm.setFieldValue('character_stage_id', firstStageId)
+                  }}
+                />
+              </Form.Item>
+              <Form.Item noStyle shouldUpdate={(prev, next) => prev.character_id !== next.character_id}>
+                {({ getFieldValue }) => {
+                  const characterId = getFieldValue('character_id') as string | undefined
+                  return (
+                    <Form.Item label="人生阶段" name="character_stage_id" style={{ minWidth: 180 }}>
+                      <Select
+                        allowClear
+                        options={Object.entries(project.analysis?.characters?.[characterId || '']?.stages ?? {}).map(([id, stage]) => ({
+                          value: id,
+                          label: `${stage.name || id}${stage.age_range ? ` · ${stage.age_range}` : ''}`,
+                        }))}
+                      />
+                    </Form.Item>
+                  )
+                }}
               </Form.Item>
             </Space>
 

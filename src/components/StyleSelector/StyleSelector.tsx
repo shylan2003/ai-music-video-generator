@@ -7,6 +7,14 @@ const { Text, Title } = Typography
 
 const styles = [
   {
+    id: 'auto',
+    name: 'AI 自动判断',
+    desc: '根据歌词类型、时代、情绪和叙事结构自动建立视觉圣经',
+    gradient: 'linear-gradient(135deg, #312e81, #7c3aed, #0891b2)',
+    accent: '#c4b5fd',
+    tag: '默认',
+  },
+  {
     id: 'cinematic',
     name: '电影质感',
     desc: '电影级色调，光影丰富',
@@ -213,8 +221,8 @@ const videoProviderOptions: Array<{
 }> = [
   {
     value: 'local_motion',
-    label: '本地免费动态',
-    desc: '不调用外部模型，导出时为图片添加推拉、横移等镜头运动',
+    label: '本地动态（仅旧工程预览）',
+    desc: '全云端正式导出不接受本地动态，请改选云端提供商',
     defaultModel: 'ken-burns',
     requiresKey: false,
   },
@@ -222,7 +230,7 @@ const videoProviderOptions: Array<{
     value: 'kling',
     label: 'Kling 付费',
     desc: '适合图生视频和中文古风场景，需要 API Key',
-    defaultModel: 'kling-v1-6',
+    defaultModel: 'kling-v2-5-turbo',
     requiresKey: true,
   },
   {
@@ -288,6 +296,7 @@ const StyleSelector: React.FC = () => {
     videoSettings,
     modelTemplates,
     setStyle,
+    setProject,
     setDirectorSettings,
     setImageSettings,
     setVideoSettings,
@@ -302,6 +311,17 @@ const StyleSelector: React.FC = () => {
   const imageTemplates = modelTemplates.filter((template) => template.kind === 'image')
   const videoTemplates = modelTemplates.filter((template) => template.kind === 'video')
 
+  const invalidateProviderLock = () => {
+    setProject({
+      generationPolicy: {
+        ...project.generationPolicy,
+        test_approved: false,
+        provider_locked: false,
+        test_scene_indexes: [],
+      },
+    })
+  }
+
   const handleProviderChange = (provider: ImageProvider) => {
     const nextProvider = providerOptions.find((item) => item.value === provider) ?? providerOptions[0]
     setImageSettings({
@@ -315,6 +335,7 @@ const StyleSelector: React.FC = () => {
             : '',
       apiKey: '',
     })
+    invalidateProviderLock()
   }
 
   const handleVideoProviderChange = (provider: VideoProvider) => {
@@ -325,6 +346,7 @@ const StyleSelector: React.FC = () => {
       baseUrl: provider === 'custom' ? videoSettings.baseUrl : '',
       apiKey: '',
     })
+    invalidateProviderLock()
   }
 
   const applyTemplate = (templateId: string) => {
@@ -346,6 +368,8 @@ const StyleSelector: React.FC = () => {
         baseUrl: template.baseUrl || '',
       })
     }
+
+    invalidateProviderLock()
 
     message.success('模型模板已应用')
   }
@@ -615,7 +639,10 @@ const StyleSelector: React.FC = () => {
             </Text>
             <Select
               value={imageSettings.model}
-              onChange={(model) => setImageSettings({ model })}
+              onChange={(model) => {
+                setImageSettings({ model })
+                invalidateProviderLock()
+              }}
               options={providerModelOptions[imageSettings.provider]}
               style={{ width: '100%' }}
             />
@@ -714,7 +741,10 @@ const StyleSelector: React.FC = () => {
             </Text>
             <Select
               value={videoSettings.model}
-              onChange={(model) => setVideoSettings({ model })}
+              onChange={(model) => {
+                setVideoSettings({ model })
+                invalidateProviderLock()
+              }}
               options={videoModelOptions[videoSettings.provider]}
               style={{ width: '100%' }}
             />
@@ -778,16 +808,16 @@ const StyleSelector: React.FC = () => {
             </div>
           )}
 
-          {false && videoSettings.provider !== 'local_motion' && videoSettings.provider !== 'none' && (
+          {videoSettings.provider !== 'local_motion' && videoSettings.provider !== 'none' && (
             <Text style={{ color: '#22c55e', fontSize: 11, lineHeight: 1.6 }}>
-              已接入视频生成队列；生成成功后导出会优先使用模型返回的视频片段。
+              全云端模式会锁定当前提供商和模型；需先通过三镜测试，再生成全部镜头。
               {videoSettings.provider === 'luma' ? ' Luma 需要公网 HTTPS 图片，可设置 PUBLIC_BACKEND_BASE_URL。' : ''}
             </Text>
           )}
 
-          {videoSettings.provider !== 'local_motion' && videoSettings.provider !== 'none' && (
-            <Text style={{ color: '#fbbf24', fontSize: 11, lineHeight: 1.6 }}>
-              外部视频模型入口已预留；当前导出仍使用本地镜头运动，后续可接入真实图生视频 API。
+          {(videoSettings.provider === 'local_motion' || videoSettings.provider === 'none') && (
+            <Text style={{ color: '#fca5a5', fontSize: 11, lineHeight: 1.6 }}>
+              当前选择不能用于正式导出，请选择 Kling、Runway、Luma 或自定义云端接口。
             </Text>
           )}
         </div>

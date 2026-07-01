@@ -32,12 +32,26 @@ interface ExportScene {
   image_url: string
   video_url?: string
   camera_motion?: string
+  transition?: string
+  video_provider?: string
+  video_model?: string
+  style_fingerprint?: string
+  quality_status?: string
+  rendered_duration?: number
 }
 
 interface ExportLyric {
   id: string
   time: number
   text: string
+}
+
+interface ExportAsset {
+  id: string
+  type: 'image' | 'video' | 'prompt'
+  title: string
+  url?: string
+  prompt?: string
 }
 
 interface ExportRequest {
@@ -53,6 +67,9 @@ interface ExportRequest {
   }
   lyrics?: ExportLyric[]
   scenes: ExportScene[]
+  outputMode?: 'final' | 'edit_bundle' | 'both'
+  assets?: ExportAsset[]
+  projectName?: string
 }
 
 interface ExportProgressPayload {
@@ -322,7 +339,7 @@ async function createSubtitleFile(tempDir: string, request: ExportRequest) {
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    'Style: Default,Microsoft YaHei,52,&H00FFFFFF,&H00FFFFFF,&HA0000000,&H30000000,0,0,0,0,100,100,1,0,1,2,1,2,100,100,78,1',
+    'Style: Default,Source Han Serif SC,42,&H00FFFFFF,&H00FFFFFF,&HA0000000,&H24000000,0,0,0,0,100,100,1,0,1,1.6,1,2,100,100,64,1',
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
@@ -595,18 +612,21 @@ async function createExternalSceneVideoClip(
   width: number,
   height: number,
   fps: number,
-  index: number
+  index: number,
+  includeTransitionHandle = false
 ) {
   const clipPath = path.join(tempDir, `clip-${String(index + 1).padStart(4, '0')}.mp4`)
   const duration = getSafeDuration(scene)
-  const filter = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p`
+  const transitionDuration = includeTransitionHandle ? getCloudTransitionDuration(scene) : 0
+  const materializedDuration = duration + transitionDuration
+  const filter = `fps=${fps},scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,normalize=independence=0.8:strength=0.12:smoothing=50,format=yuv420p`
 
   await runFfmpeg(resolvedFfmpegPath, [
     '-y',
     '-i',
     videoPath,
     '-t',
-    duration.toFixed(3),
+    materializedDuration.toFixed(3),
     '-vf',
     filter,
     '-an',
@@ -615,13 +635,101 @@ async function createExternalSceneVideoClip(
     '-preset',
     'veryfast',
     '-crf',
-    '22',
+    '20',
     '-pix_fmt',
     'yuv420p',
     clipPath,
   ])
 
   return clipPath
+}
+
+function getCloudTransitionDuration(scene: ExportScene) {
+  if (!(scene.transition || '').toLowerCase().includes('dissolve')) return 0
+  const requested = getSafeDuration(scene)
+  const spare = Math.max(0, (scene.rendered_duration ?? requested) - requested)
+  if (spare < 0.4) return 0
+  return Math.min(0.8, spare, 0.6)
+}
+
+async function applyCloudTransitions(
+  resolvedFfmpegPath: string,
+  tempDir: string,
+  scenes: ExportScene[],
+  clipPaths: string[]
+) {
+  const outputPaths: string[] = []
+
+  for (let index = 0; index < scenes.length; index += 1) {
+    const incomingTransition = index > 0 ? getCloudTransitionDuration(scenes[index - 1]) : 0
+    const outgoingTransition = getCloudTransitionDuration(scenes[index])
+    const requestedDuration = getSafeDuration(scenes[index])
+
+    if (incomingTransition === 0 && outgoingTransition === 0) {
+      outputPaths.push(clipPaths[index])
+    } else {
+      const bodyPath = path.join(tempDir, `transition-body-${String(index + 1).padStart(4, '0')}.mp4`)
+      await runFfmpeg(resolvedFfmpegPath, [
+        '-y',
+        '-ss',
+        incomingTransition.toFixed(3),
+        '-i',
+        clipPaths[index],
+        '-t',
+        Math.max(0.1, requestedDuration - incomingTransition).toFixed(3),
+        '-an',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '20',
+        '-pix_fmt',
+        'yuv420p',
+        bodyPath,
+      ])
+      outputPaths.push(bodyPath)
+    }
+
+    if (outgoingTransition > 0 && index + 1 < scenes.length) {
+      const mixPath = path.join(tempDir, `transition-mix-${String(index + 1).padStart(4, '0')}.mp4`)
+      const transitionText = outgoingTransition.toFixed(3)
+      await runFfmpeg(resolvedFfmpegPath, [
+        '-y',
+        '-ss',
+        requestedDuration.toFixed(3),
+        '-t',
+        transitionText,
+        '-i',
+        clipPaths[index],
+        '-ss',
+        '0',
+        '-t',
+        transitionText,
+        '-i',
+        clipPaths[index + 1],
+        '-filter_complex',
+        `[0:v]setpts=PTS-STARTPTS[a];[1:v]setpts=PTS-STARTPTS[b];[a][b]blend=all_expr='A*(1-T/${transitionText})+B*(T/${transitionText})'[mix]`,
+        '-map',
+        '[mix]',
+        '-t',
+        transitionText,
+        '-an',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '20',
+        '-pix_fmt',
+        'yuv420p',
+        mixPath,
+      ])
+      outputPaths.push(mixPath)
+    }
+  }
+
+  return outputPaths
 }
 
 async function createSceneVideoClips(
@@ -683,7 +791,8 @@ async function createMixedSceneVideoClips(
         width,
         height,
         fps,
-        index
+        index,
+        true
       )
     } else {
       const imagePath = await materializeSceneImage(scene.image_url, tempDir, index)
@@ -742,7 +851,7 @@ function createConcatVideoWithAudioArgs(
       '-preset',
       'medium',
       '-crf',
-      '22',
+      '20',
       '-pix_fmt',
       'yuv420p',
       '-c:a',
@@ -771,6 +880,125 @@ function createConcatVideoWithAudioArgs(
   ]
 }
 
+function formatSrtTime(seconds: number) {
+  const milliseconds = Math.max(0, Math.round(seconds * 1000))
+  const hours = Math.floor(milliseconds / 3_600_000)
+  const minutes = Math.floor((milliseconds % 3_600_000) / 60_000)
+  const secs = Math.floor((milliseconds % 60_000) / 1000)
+  const millis = milliseconds % 1000
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(millis).padStart(3, '0')}`
+}
+
+function createSrtText(request: ExportRequest) {
+  const lyrics = [...(request.lyrics ?? [])].filter((line) => line.text.trim()).sort((a, b) => a.time - b.time)
+  const totalDuration = getTotalDuration(request)
+  return lyrics.map((line, index) => {
+    const nextStart = lyrics[index + 1]?.time
+    const endTime = Math.max(line.time + 0.8, Math.min(nextStart ?? line.time + 4, totalDuration))
+    return `${index + 1}\n${formatSrtTime(line.time)} --> ${formatSrtTime(endTime)}\n${line.text.trim()}\n`
+  }).join('\n')
+}
+
+function safeBundleName(value: string) {
+  return value.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim().slice(0, 80) || 'music-video'
+}
+
+async function getAvailableBundlePath(outputPath: string, projectName?: string) {
+  const parent = path.dirname(outputPath)
+  const baseName = safeBundleName(projectName || path.basename(outputPath, path.extname(outputPath)))
+  const preferred = path.join(parent, `${baseName}_剪映素材包`)
+  if (!existsSync(preferred)) return preferred
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/T/, '-').slice(0, 15)
+  return path.join(parent, `${baseName}_剪映素材包-${stamp}`)
+}
+
+async function exportEditBundle(request: ExportRequest) {
+  const resolvedFfmpegPath = getResolvedFfmpegPath()
+  if (!resolvedFfmpegPath) throw new Error('未检测到 ffmpeg，无法导出剪映素材包')
+  const bundlePath = await getAvailableBundlePath(request.outputPath, request.projectName)
+  const clipsDir = path.join(bundlePath, '01-clips')
+  const keyframesDir = path.join(bundlePath, '02-keyframes')
+  const referencesDir = path.join(bundlePath, '03-references')
+  const audioDir = path.join(bundlePath, '04-audio')
+  const subtitlesDir = path.join(bundlePath, '05-subtitles')
+  await Promise.all([clipsDir, keyframesDir, referencesDir, audioDir, subtitlesDir].map((dir) => fs.mkdir(dir, { recursive: true })))
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'music-video-bundle-'))
+  try {
+    const width = request.width ?? 1920
+    const height = request.height ?? 1080
+    const fps = request.fps ?? 30
+    const sortedScenes = [...request.scenes].sort((a, b) => a.start_time - b.start_time)
+    const manifestScenes: Array<Record<string, unknown>> = []
+    for (const [index, scene] of sortedScenes.entries()) {
+      if (!isExternalSceneVideo(scene.video_url)) throw new Error(`镜头 ${scene.scene_index + 1} 缺少云端视频`)
+      const sourceVideoPath = await materializeSceneVideo(scene.video_url as string, tempDir, index)
+      const normalizedClip = await createExternalSceneVideoClip(
+        resolvedFfmpegPath, tempDir, scene, sourceVideoPath, width, height, fps, index
+      )
+      const clipName = `scene-${String(index + 1).padStart(3, '0')}.mp4`
+      await fs.copyFile(normalizedClip, path.join(clipsDir, clipName))
+
+      const imagePath = await materializeSceneImage(scene.image_url, tempDir, index)
+      const imageExt = path.extname(imagePath) || '.png'
+      const imageName = `scene-${String(index + 1).padStart(3, '0')}${imageExt}`
+      await fs.copyFile(imagePath, path.join(keyframesDir, imageName))
+      manifestScenes.push({
+        scene_index: scene.scene_index,
+        title: scene.title,
+        start_time: scene.start_time,
+        end_time: scene.end_time,
+        duration: Number((scene.end_time - scene.start_time).toFixed(3)),
+        clip: `01-clips/${clipName}`,
+        keyframe: `02-keyframes/${imageName}`,
+        transition: scene.transition || 'cut',
+        video_provider: scene.video_provider,
+        video_model: scene.video_model,
+        style_fingerprint: scene.style_fingerprint,
+      })
+    }
+
+    const audioExt = path.extname(request.audioPath) || '.mp3'
+    await fs.copyFile(request.audioPath, path.join(audioDir, `original${audioExt}`))
+    const subtitlePath = await createSubtitleFile(tempDir, request)
+    if (subtitlePath) await fs.copyFile(subtitlePath, path.join(subtitlesDir, 'lyrics.ass'))
+    await fs.writeFile(path.join(subtitlesDir, 'lyrics.srt'), createSrtText(request), 'utf8')
+
+    for (const [index, asset] of (request.assets ?? []).filter((item) => item.type === 'image' && item.url).entries()) {
+      try {
+        const assetPath = await materializeSceneImage(asset.url as string, tempDir, 10_000 + index)
+        const ext = path.extname(assetPath) || '.png'
+        await fs.copyFile(assetPath, path.join(referencesDir, `${String(index + 1).padStart(3, '0')}-${safeBundleName(asset.title)}${ext}`))
+      } catch {
+        // A missing historical reference must not invalidate otherwise complete scene clips.
+      }
+    }
+
+    const manifest = {
+      schema_version: 1,
+      project_name: request.projectName || path.basename(request.outputPath, path.extname(request.outputPath)),
+      width,
+      height,
+      fps,
+      duration: getTotalDuration(request),
+      created_at: new Date().toISOString(),
+      scenes: manifestScenes,
+    }
+    await fs.writeFile(path.join(bundlePath, 'timeline.json'), JSON.stringify(manifest, null, 2), 'utf8')
+    const csv = [
+      'scene_index,start_time,end_time,duration,title,clip,transition',
+      ...manifestScenes.map((scene) => [
+        scene.scene_index, scene.start_time, scene.end_time, scene.duration,
+        `"${String(scene.title).replace(/"/g, '""')}"`, scene.clip, scene.transition,
+      ].join(',')),
+    ].join('\n')
+    await fs.writeFile(path.join(bundlePath, 'timeline.csv'), csv, 'utf8')
+    return bundlePath
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true })
+  }
+}
+
 async function exportVideo(request: ExportRequest) {
   if (!request.audioPath || !path.isAbsolute(request.audioPath)) {
     throw new Error('未获取到可用的本地音频路径，请重新导入音乐文件后再试')
@@ -791,6 +1019,23 @@ async function exportVideo(request: ExportRequest) {
   const invalidScene = request.scenes.find((scene) => !scene.image_url && !isExternalSceneVideo(scene.video_url))
   if (invalidScene) {
     throw new Error(`分镜 ${invalidScene.scene_index + 1} 缺少图片，无法导出`)
+  }
+
+  const invalidCloudScene = request.scenes.find((scene) => (
+    !isExternalSceneVideo(scene.video_url)
+    || scene.quality_status !== 'approved'
+    || !scene.video_provider
+    || !scene.video_model
+    || !scene.style_fingerprint
+  ))
+  if (invalidCloudScene) {
+    throw new Error(`分镜 ${invalidCloudScene.scene_index + 1} 未完成云端视频生成或质检，无法正式导出`)
+  }
+  const providerLocks = new Set(
+    request.scenes.map((scene) => `${scene.video_provider}:${scene.video_model}:${scene.style_fingerprint}`)
+  )
+  if (providerLocks.size !== 1) {
+    throw new Error('正式成片包含不同的视频模型或视觉圣经版本，已阻止混合导出')
   }
 
   const resolvedFfmpegPath = getResolvedFfmpegPath()
@@ -821,7 +1066,13 @@ async function exportVideo(request: ExportRequest) {
         height,
         fps
       )
-      const clipConcatFilePath = await createVideoConcatListFile(tempDir, clipPaths)
+      const transitionedClipPaths = await applyCloudTransitions(
+        resolvedFfmpegPath,
+        tempDir,
+        request.scenes,
+        clipPaths
+      )
+      const clipConcatFilePath = await createVideoConcatListFile(tempDir, transitionedClipPaths)
 
       sendExportProgress({ stage: 'render', progress: 80, message: '姝ｅ湪鎷兼帴瑙嗛鐗囨骞跺悎鎴愰煶棰?..' })
 
@@ -911,8 +1162,8 @@ async function exportVideo(request: ExportRequest) {
         'libx264',
         '-preset',
         'medium',
-        '-crf',
-        '22',
+    '-crf',
+    '20',
         '-pix_fmt',
         'yuv420p',
         '-c:a',
@@ -991,6 +1242,7 @@ function startBackend() {
       MUSIC_VIDEO_DATA_DIR: path.join(app.getPath('userData'), 'backend-data'),
       MUSIC_VIDEO_RELOAD: '0',
       MUSIC_VIDEO_SESSION_TOKEN: backendSessionToken,
+      MUSIC_VIDEO_FFMPEG_PATH: getResolvedFfmpegPath() || '',
     },
   })
 
@@ -1117,7 +1369,19 @@ ipcMain.handle('dialog:saveFile', async (_, options) => {
 
 ipcMain.handle('video:export', async (_, request: ExportRequest) => {
   try {
-    return await exportVideo(request)
+    const mode = request.outputMode || 'both'
+    let outputPath: string | undefined
+    let bundlePath: string | undefined
+    if (mode !== 'edit_bundle') {
+      const result = await exportVideo(request)
+      outputPath = result.outputPath
+    }
+    if (mode !== 'final') {
+      sendExportProgress({ stage: 'prepare', progress: 2, message: '正在生成剪映标准素材包...' })
+      bundlePath = await exportEditBundle(request)
+    }
+    sendExportProgress({ stage: 'complete', progress: 100, message: '导出完成' })
+    return { outputPath: outputPath || request.outputPath, bundlePath }
   } catch (error) {
     const message = error instanceof Error ? error.message : '视频导出失败'
     sendExportProgress({ stage: 'error', progress: 0, message })

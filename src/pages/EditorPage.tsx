@@ -56,6 +56,7 @@ const EditorPage: React.FC = () => {
   const [isExporting, setIsExporting] = useState(false)
   const [exportProgress, setExportProgress] = useState(0)
   const [exportLyricsEnabled, setExportLyricsEnabled] = useState(true)
+  const [exportMode, setExportMode] = useState<'final' | 'edit_bundle' | 'both'>('both')
   const [exportMessage, setExportMessage] = useState('等待开始导出')
   const [previewWidth, setPreviewWidth] = useState(360)
   const [draftProjectName, setDraftProjectName] = useState(project.name)
@@ -90,7 +91,7 @@ const EditorPage: React.FC = () => {
   }
 
   const handleSaveProject = async () => {
-    const serializedProject = { ...serializeProject(project), schemaVersion: 2 as const }
+    const serializedProject = { ...serializeProject(project), schemaVersion: 3 as const }
     const fileName = `${sanitizeFileName(project.name)}.mv-project.json`
     if (window.electronAPI?.saveFile && window.electronAPI.writeTextFile) {
       const saveResult = await window.electronAPI.saveFile({
@@ -214,6 +215,25 @@ const EditorPage: React.FC = () => {
       return
     }
 
+    if (!project.generationPolicy.test_approved || !project.generationPolicy.provider_locked) {
+      message.warning('请先完成三镜测试并锁定当前云端图片/视频模型')
+      return
+    }
+
+    const invalidCloudScene = project.scenes.find((scene) => (
+      scene.video_status !== 'done'
+      || !scene.video_url
+      || scene.video_url.startsWith('local-motion://')
+      || scene.video_provider !== project.generationPolicy.video_provider
+      || scene.video_model !== project.generationPolicy.video_model
+      || scene.style_fingerprint !== project.generationPolicy.style_fingerprint
+      || scene.quality_status !== 'approved'
+    ))
+    if (invalidCloudScene) {
+      message.warning(`镜头 ${invalidCloudScene.scene_index + 1} 尚未完成同模型云端生成或质检，正式导出已阻止`)
+      return
+    }
+
     const startedAt = Date.now()
     try {
       setIsExporting(true)
@@ -231,10 +251,16 @@ const EditorPage: React.FC = () => {
         width: 1920,
         height: 1080,
         fps: 30,
-        motion:
-          videoSettings.provider === 'local_motion'
-            ? videoSettings.motionStrength
-            : 'none',
+        outputMode: exportMode,
+        projectName: project.name,
+        assets: (project.assets ?? []).map((asset) => ({
+          id: asset.id,
+          type: asset.type,
+          title: asset.title,
+          url: asset.url,
+          prompt: asset.prompt,
+        })),
+        motion: 'none',
         subtitles: {
           enabled: exportLyricsEnabled,
         },
@@ -256,6 +282,12 @@ const EditorPage: React.FC = () => {
             image_url: scene.image_url,
             video_url: scene.video_url,
             camera_motion: scene.camera_motion,
+            transition: scene.transition,
+            video_provider: scene.video_provider,
+            video_model: scene.video_model,
+            style_fingerprint: scene.style_fingerprint,
+            quality_status: scene.quality_status,
+            rendered_duration: scene.rendered_duration,
           })),
       })
 
@@ -266,14 +298,14 @@ const EditorPage: React.FC = () => {
         title: '导出 MV',
         provider: 'ffmpeg',
         model: videoSettings.provider,
-        message: `已导出到 ${result.outputPath}；${project.scenes.length} 个镜头；字幕${exportLyricsEnabled ? '已开启' : '已关闭'}`,
+        message: `已导出到 ${result.outputPath}${result.bundlePath ? `；素材包 ${result.bundlePath}` : ''}；${project.scenes.length} 个镜头`,
         durationMs: Date.now() - startedAt,
       })
       setExportMessage('视频导出完成')
       message.success('MV 导出成功')
       Modal.success({
         title: '导出完成',
-        content: `MV 已导出到：${result.outputPath}`,
+        content: `MV：${result.outputPath}${result.bundlePath ? `\n剪映素材包：${result.bundlePath}` : ''}`,
         okText: '知道了',
       })
     } catch (error) {
@@ -451,6 +483,19 @@ const EditorPage: React.FC = () => {
               checkedChildren="开启"
               unCheckedChildren="关闭"
             />
+          </div>
+
+          <div>
+            <Text style={{ color: '#475569', fontSize: 12, display: 'block', marginBottom: 8 }}>
+              导出内容
+            </Text>
+            <Radio.Group value={exportMode} onChange={(event) => setExportMode(event.target.value)}>
+              <Space direction="vertical">
+                <Radio value="both">完整 MP4 + 剪映标准素材包</Radio>
+                <Radio value="final">仅完整 MP4</Radio>
+                <Radio value="edit_bundle">仅剪映标准素材包</Radio>
+              </Space>
+            </Radio.Group>
           </div>
 
           <Text style={{ color: '#94a3b8', fontSize: 12 }}>

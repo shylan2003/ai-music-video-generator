@@ -9,6 +9,8 @@ backend/__pycache__/
 *.py[cod]
 backend/generated_images/
 backend/generated_videos/
+backend/video_tasks.json
+backend/*.part
 backend-data/
 artifacts/
 release/

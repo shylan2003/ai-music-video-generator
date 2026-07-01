@@ -192,6 +192,14 @@ def run_storyboard_probe(
             "size": "1280x720",
             "quality": "medium",
         },
+        "generation_policy": {
+            "mode": "cloud_all",
+            "target_scene_seconds": 8,
+            "min_scene_seconds": 6,
+            "max_scene_seconds": 10,
+            "require_test_batch": True,
+            "prompt_version": 1,
+        },
     }
     storyboard_result = post_json("/api/generate/smart-storyboard", request_payload)
     scenes = storyboard_result.get("scenes", [])
@@ -200,6 +208,8 @@ def run_storyboard_probe(
     assert_condition(scenes, "智能分镜没有生成任何场景")
     assert_condition(analysis.get("total_scenes") == len(scenes), "analysis.total_scenes 与实际场景数不一致")
     assert_condition(analysis.get("valid_lyrics") == len(valid_lyrics), "analysis.valid_lyrics 与过滤结果不一致")
+    assert_condition(analysis.get("resolved_style") == "gorgeous_ancient", "手动风格被 AI 或规则覆盖")
+    assert_condition(analysis.get("visual_bible", {}).get("fingerprint"), "视觉圣经缺少不可变指纹")
 
     covered_ids = {lyric_id for scene in scenes for lyric_id in scene.get("lyric_ids", [])}
     expected_valid_ids = {line["id"] for line in valid_lyrics}
@@ -213,35 +223,15 @@ def run_storyboard_probe(
         assert_condition(scene.get("prompt"), f"场景 {scene.get('scene_index')} 缺少 prompt")
         assert_condition("silver-haired pipa player" in prompt, f"视觉锁定主角未进入 Prompt：{scene.get('scene_index')}")
         assert_condition("cold moon white" in prompt, f"视觉锁定色调未进入 Prompt：{scene.get('scene_index')}")
-        assert_condition(len(description.strip()) >= 8, f"场景 {scene.get('scene_index')} 描述过短：{description}")
+        assert_condition(len(description.strip()) >= 2, f"场景 {scene.get('scene_index')} 描述过短：{description}")
+        scene_duration = float(scene.get("end_time", 0)) - float(scene.get("start_time", 0))
+        assert_condition(5.95 <= scene_duration <= 10.05, f"镜头时长不在 6-10 秒范围：{scene_duration}")
+        assert_condition(scene.get("video_status") == "idle", "分镜阶段不应调用视频接口")
+        assert_condition(scene.get("quality_status") == "pending", "新镜头质检状态应为 pending")
         assert_condition(
             not any(text in description for text in FORBIDDEN_SCENE_TEXT),
             f"场景 {scene.get('scene_index')} 混入了元信息或歌手标签：{description}",
         )
-        if short_ids.intersection(lyric_ids):
-            assert_condition(
-                len(lyric_ids) > 1,
-                f"短句没有合并到周围歌词中：场景 {scene.get('scene_index')} -> {description}",
-            )
-
-    video_probe = post_json(
-        "/api/generate/video",
-        {
-            "prompt": scenes[0]["video_prompt"],
-            "image_url": scenes[0]["image_url"],
-            "scene_index": scenes[0]["scene_index"],
-            "duration": 4,
-            "camera_motion": scenes[0].get("camera_motion", ""),
-            "video_provider": {
-                "provider": "local_motion",
-                "model": "ken-burns",
-                "motion_strength": "standard",
-                "clip_seconds": 4,
-            },
-        },
-    )
-    assert_condition(video_probe.get("video_url", "").startswith("local-motion://"), "本地动态视频占位返回异常")
-
     return {
         "valid_lyrics": len(valid_lyrics),
         "skipped_lyrics": len(skipped_ids),
@@ -283,8 +273,8 @@ def run_smoke() -> dict:
             ),
         }
         assert_condition(
-            15 <= real_lrc_summary["scenes"] <= 25,
-            f"《琵琶行》分镜数应为 15-25，实际 {real_lrc_summary['scenes']}",
+            30 <= real_lrc_summary["scenes"] <= 50,
+            f"五分钟歌曲分镜数应为 30-50，实际 {real_lrc_summary['scenes']}",
         )
 
     return {

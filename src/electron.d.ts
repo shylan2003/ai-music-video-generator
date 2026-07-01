@@ -31,6 +31,15 @@ declare global {
         width?: number
         height?: number
         fps?: number
+        outputMode?: 'final' | 'edit_bundle' | 'both'
+        projectName?: string
+        assets?: Array<{
+          id: string
+          type: 'image' | 'video' | 'prompt'
+          title: string
+          url?: string
+          prompt?: string
+        }>
         motion?: 'none' | 'subtle' | 'standard' | 'dramatic'
         subtitles?: {
           enabled?: boolean
@@ -48,8 +57,14 @@ declare global {
           image_url: string
           video_url?: string
           camera_motion?: string
+          transition?: string
+          video_provider?: string
+          video_model?: string
+          style_fingerprint?: string
+          quality_status?: string
+          rendered_duration?: number
         }>
-      }) => Promise<{ outputPath: string }>
+      }) => Promise<{ outputPath: string; bundlePath?: string }>
       onExportProgress: (
         callback: (payload: {
           stage: 'prepare' | 'download' | 'render' | 'complete' | 'error'
