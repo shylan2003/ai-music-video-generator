@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import mimetypes
+import os
 import time
 from pathlib import Path
 from typing import Awaitable, Callable
+from urllib.parse import unquote, urlparse
 
 import httpx
 
@@ -14,6 +16,7 @@ DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 DEFAULT_MODEL = "wan2.6-image"
 _submit_lock = asyncio.Lock()
 _last_submit_time = 0.0
+MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 def normalize_size(size: str) -> str:
@@ -23,16 +26,48 @@ def normalize_size(size: str) -> str:
     return "1280*720"
 
 
+def local_generated_image_path(source: str) -> Path | None:
+    parsed = urlparse(source)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if parsed.hostname not in {"127.0.0.1", "localhost", "0.0.0.0"}:
+        return None
+    if not parsed.path.startswith("/generated/"):
+        return None
+
+    filename = Path(unquote(parsed.path)).name
+    if not filename:
+        return None
+    data_dir = Path(
+        os.getenv("MUSIC_VIDEO_DATA_DIR", str(Path(__file__).resolve().parents[1]))
+    ).resolve()
+    generated_dir = (data_dir / "generated_images").resolve()
+    candidate = (generated_dir / filename).resolve()
+    if candidate.parent != generated_dir:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def file_to_data_uri(path: Path) -> str:
+    if path.stat().st_size > MAX_REFERENCE_IMAGE_BYTES:
+        raise ValueError("参考图片超过通义万相 10MB 限制")
+    mime = mimetypes.guess_type(str(path))[0] or "image/png"
+    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('utf-8')}"
+
+
 async def image_to_data_uri(source: str) -> str:
     if source.startswith("data:image/"):
         return source
     if Path(source).is_absolute() and Path(source).exists():
-        path = Path(source)
-        mime = mimetypes.guess_type(str(path))[0] or "image/png"
-        return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('utf-8')}"
+        return file_to_data_uri(Path(source))
+    local_path = local_generated_image_path(source)
+    if local_path:
+        return file_to_data_uri(local_path)
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
         response = await client.get(source)
         response.raise_for_status()
+        if len(response.content) > MAX_REFERENCE_IMAGE_BYTES:
+            raise ValueError("参考图片超过通义万相 10MB 限制")
         mime = response.headers.get("content-type", "image/png").split(";", 1)[0]
         return f"data:{mime};base64,{base64.b64encode(response.content).decode('utf-8')}"
 
@@ -131,4 +166,3 @@ async def generate_tongyi_image(
             output_path.write_bytes(image_response.content)
             return public_url_for_path(output_path)
     raise TimeoutError("通义万相生成超时")
-
