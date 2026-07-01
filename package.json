@@ -17,6 +17,7 @@
     "test:director": "node scripts/run_python.js -m unittest scripts/test_director.py",
     "test:video-resume": "node scripts/run_python.js -m unittest scripts/test_video_task_resume.py",
     "test:export-policy": "tsc -p tsconfig.electron.json && node scripts/test_export_policy.js",
+    "test:backend-port": "tsc -p tsconfig.electron.json && node scripts/test_backend_port.js",
     "test:e2e-export": "node scripts/run_python.js scripts/e2e_export_mv.py",
     "backend:exe": "node scripts/run_python.js scripts/build_backend_exe.py",
     "pack:full": "npm run backend:exe && npm run build && electron-builder --dir",

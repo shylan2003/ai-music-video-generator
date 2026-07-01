@@ -11,6 +11,7 @@ import { pathToFileURL } from 'url'
 import axios from 'axios'
 import ffmpegPath from 'ffmpeg-static'
 import { assertCloudExportScenes, type CloudExportScene } from './exportPolicy'
+import { findAvailableLoopbackPort } from './network'
 
 const ffmpegInstallerPath = (() => {
   try {
@@ -23,6 +24,7 @@ const ffmpegInstallerPath = (() => {
 const isDev = !app.isPackaged
 let mainWindow: BrowserWindow | null = null
 let backendProcess: ChildProcess | null = null
+let backendPort = 8000
 const backendSessionToken = randomBytes(32).toString('hex')
 
 interface ExportScene extends CloudExportScene {
@@ -1207,7 +1209,8 @@ async function exportVideo(request: ExportRequest) {
   }
 }
 
-function startBackend() {
+async function startBackend() {
+  backendPort = await findAvailableLoopbackPort()
   const backendExePath = isDev
     ? path.join(__dirname, '../backend_dist/music-video-backend.exe')
     : path.join(process.resourcesPath, 'backend-exe/music-video-backend.exe')
@@ -1224,6 +1227,7 @@ function startBackend() {
     env: {
       ...process.env,
       MUSIC_VIDEO_DATA_DIR: path.join(app.getPath('userData'), 'backend-data'),
+      MUSIC_VIDEO_BACKEND_PORT: String(backendPort),
       MUSIC_VIDEO_RELOAD: '0',
       MUSIC_VIDEO_SESSION_TOKEN: backendSessionToken,
       MUSIC_VIDEO_FFMPEG_PATH: getResolvedFfmpegPath() || '',
@@ -1323,7 +1327,7 @@ ipcMain.handle('file:toUrl', async (_, filePath: string) => {
 })
 
 ipcMain.handle('backend:config', async () => ({
-  baseUrl: 'http://127.0.0.1:8000',
+  baseUrl: `http://127.0.0.1:${backendPort}`,
   token: backendSessionToken,
 }))
 
@@ -1373,9 +1377,9 @@ ipcMain.handle('video:export', async (_, request: ExportRequest) => {
   }
 })
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (!isDev) {
-    startBackend()
+    await startBackend()
   }
   createWindow()
 })
