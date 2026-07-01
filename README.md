@@ -89,6 +89,8 @@ npm run typecheck            # TypeScript 检查
     npm run test:lyrics          # LRC / SRT / TXT 解析测试
     npm run test:cloud-storyboard # 6～10 秒镜头、完整覆盖和 30～50 镜头测试
     npm run test:director        # 五类歌曲识别、手动风格锁和人生阶段测试
+    npm run test:video-resume    # 云端任务 ID 恢复与成功任务去重测试
+    npm run test:export-policy   # 全云端导出门禁与时间线一致性测试
 npm run build                # 构建前端和 Electron 主进程
 npm run check                # 类型检查 + 构建
 npm run test:e2e-storyboard  # 验证歌词过滤、短句合并、智能分镜

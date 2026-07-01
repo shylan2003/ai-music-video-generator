@@ -10,6 +10,7 @@ import { randomBytes } from 'crypto'
 import { pathToFileURL } from 'url'
 import axios from 'axios'
 import ffmpegPath from 'ffmpeg-static'
+import { assertCloudExportScenes, type CloudExportScene } from './exportPolicy'
 
 const ffmpegInstallerPath = (() => {
   try {
@@ -24,7 +25,7 @@ let mainWindow: BrowserWindow | null = null
 let backendProcess: ChildProcess | null = null
 const backendSessionToken = randomBytes(32).toString('hex')
 
-interface ExportScene {
+interface ExportScene extends CloudExportScene {
   scene_index: number
   title: string
   start_time: number
@@ -913,6 +914,7 @@ async function getAvailableBundlePath(outputPath: string, projectName?: string) 
 }
 
 async function exportEditBundle(request: ExportRequest) {
+  assertCloudExportScenes(request.scenes, request.duration, request.fps ?? 30)
   const resolvedFfmpegPath = getResolvedFfmpegPath()
   if (!resolvedFfmpegPath) throw new Error('未检测到 ffmpeg，无法导出剪映素材包')
   const bundlePath = await getAvailableBundlePath(request.outputPath, request.projectName)
@@ -1012,31 +1014,7 @@ async function exportVideo(request: ExportRequest) {
     throw new Error('导出路径无效，请重新选择导出位置')
   }
 
-  if (!Array.isArray(request.scenes) || request.scenes.length === 0) {
-    throw new Error('当前没有可导出的分镜，请先生成段落分镜')
-  }
-
-  const invalidScene = request.scenes.find((scene) => !scene.image_url && !isExternalSceneVideo(scene.video_url))
-  if (invalidScene) {
-    throw new Error(`分镜 ${invalidScene.scene_index + 1} 缺少图片，无法导出`)
-  }
-
-  const invalidCloudScene = request.scenes.find((scene) => (
-    !isExternalSceneVideo(scene.video_url)
-    || scene.quality_status !== 'approved'
-    || !scene.video_provider
-    || !scene.video_model
-    || !scene.style_fingerprint
-  ))
-  if (invalidCloudScene) {
-    throw new Error(`分镜 ${invalidCloudScene.scene_index + 1} 未完成云端视频生成或质检，无法正式导出`)
-  }
-  const providerLocks = new Set(
-    request.scenes.map((scene) => `${scene.video_provider}:${scene.video_model}:${scene.style_fingerprint}`)
-  )
-  if (providerLocks.size !== 1) {
-    throw new Error('正式成片包含不同的视频模型或视觉圣经版本，已阻止混合导出')
-  }
+  assertCloudExportScenes(request.scenes, request.duration, request.fps ?? 30)
 
   const resolvedFfmpegPath = getResolvedFfmpegPath()
   if (typeof resolvedFfmpegPath !== 'string' || !resolvedFfmpegPath) {
@@ -1047,8 +1025,8 @@ async function exportVideo(request: ExportRequest) {
 
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'music-video-export-'))
   const totalDuration = getTotalDuration(request)
-    const width = request.width ?? 1920
-    const height = request.height ?? 1080
+  const width = request.width ?? 1920
+  const height = request.height ?? 1080
   const fps = request.fps ?? 30
 
   sendExportProgress({ stage: 'prepare', progress: 2, message: '正在准备导出素材...' })

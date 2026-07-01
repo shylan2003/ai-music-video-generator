@@ -15,6 +15,8 @@
     "test:lyrics": "python -m unittest scripts/test_lyrics_parser.py",
     "test:cloud-storyboard": "python -m unittest scripts/test_cloud_storyboard.py",
     "test:director": "python -m unittest scripts/test_director.py",
+    "test:video-resume": "python -m unittest scripts/test_video_task_resume.py",
+    "test:export-policy": "tsc -p tsconfig.electron.json && node scripts/test_export_policy.js",
     "test:e2e-export": "python scripts/e2e_export_mv.py",
     "backend:exe": "python scripts/build_backend_exe.py",
     "pack:full": "npm run backend:exe && npm run build && electron-builder --dir",

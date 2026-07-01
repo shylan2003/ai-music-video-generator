@@ -724,6 +724,11 @@ def get_public_backend_base_url() -> str:
     ).rstrip("/")
 
 
+def should_trust_system_proxy(url: str) -> bool:
+    hostname = (urlparse(url).hostname or "").lower()
+    return hostname not in {"localhost", "127.0.0.1", "::1"}
+
+
 def convert_local_backend_url_to_public(url: str) -> str:
     public_base_url = get_public_backend_base_url()
     if not public_base_url:
@@ -771,7 +776,11 @@ def get_placeholder_url(seed: int, config: Optional["ImageProviderConfig"] = Non
 
 async def download_image_to_cache(url: str, file_path: Path, headers: Optional[dict[str, str]] = None) -> str:
     partial_path = file_path.with_suffix(file_path.suffix + ".part")
-    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=120,
+        follow_redirects=True,
+        trust_env=should_trust_system_proxy(url),
+    ) as client:
         try:
             async with client.stream("GET", url, headers=headers) as response:
                 response.raise_for_status()
@@ -792,7 +801,11 @@ async def download_image_to_cache(url: str, file_path: Path, headers: Optional[d
 
 async def download_video_to_cache(url: str, file_path: Path, headers: Optional[dict[str, str]] = None) -> str:
     partial_path = file_path.with_suffix(file_path.suffix + ".part")
-    async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=300,
+        follow_redirects=True,
+        trust_env=should_trust_system_proxy(url),
+    ) as client:
         try:
             async with client.stream("GET", url, headers=headers) as response:
                 response.raise_for_status()
@@ -847,7 +860,10 @@ async def generate_openai_image(prompt: str, cache_key: str, config: Optional["I
         "n": 1,
     }
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(
+        timeout=120,
+        trust_env=should_trust_system_proxy(base_url),
+    ) as client:
         response = await client.post(
             f"{base_url}/images/generations",
             headers={
@@ -863,7 +879,10 @@ async def generate_openai_image(prompt: str, cache_key: str, config: Optional["I
     if not image_base64:
         image_url = data.get("data", [{}])[0].get("url")
         if image_url:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(
+                timeout=120,
+                trust_env=should_trust_system_proxy(image_url),
+            ) as client:
                 image_response = await client.get(image_url)
                 image_response.raise_for_status()
                 file_path.write_bytes(image_response.content)
@@ -1851,7 +1870,11 @@ async def generate_runway_video(request: GenerateVideoRequest, provider_config: 
         "duration": get_runway_duration(duration),
     }
 
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=120.0,
+        follow_redirects=True,
+        trust_env=should_trust_system_proxy(base_url),
+    ) as client:
         resumable = get_resumable_video_task(cache_key, "runway")
         task_id = str(resumable.get("task_id")) if resumable and resumable.get("task_id") else ""
         if task_id:
@@ -1966,7 +1989,11 @@ async def generate_luma_video(request: GenerateVideoRequest, provider_config: Vi
         if is_public_https_url(public_last_frame):
             payload["keyframes"]["frame1"] = {"type": "image", "url": public_last_frame}
 
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=120.0,
+        follow_redirects=True,
+        trust_env=should_trust_system_proxy(base_url),
+    ) as client:
         resumable = get_resumable_video_task(cache_key, "luma")
         generation_id = str(resumable.get("task_id")) if resumable and resumable.get("task_id") else ""
         if generation_id:
@@ -2065,7 +2092,11 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
     if request.last_frame_url:
         payload["image_tail"] = await get_kling_image_source(request.last_frame_url)
 
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=120.0,
+        follow_redirects=True,
+        trust_env=should_trust_system_proxy(base_url),
+    ) as client:
         resumable = get_resumable_video_task(cache_key, "kling")
         task_id = str(resumable.get("task_id")) if resumable and resumable.get("task_id") else ""
         if task_id:
@@ -2190,7 +2221,10 @@ async def generate_video(request: GenerateVideoRequest):
         }
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(
+                timeout=120.0,
+                trust_env=should_trust_system_proxy(provider_config.base_url),
+            ) as client:
                 response = await client.post(provider_config.base_url, json=payload, headers=headers)
                 response.raise_for_status()
                 data = response.json()
