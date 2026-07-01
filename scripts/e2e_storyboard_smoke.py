@@ -185,8 +185,10 @@ def run_storyboard_probe(
             "negative_prompt": "modern city, neon, text, watermark",
         },
         "image_provider": {
-            "provider": "placeholder",
-            "model": "placeholder",
+            "provider": "custom",
+            "model": "must-not-be-called",
+            "api_key": "test-only",
+            "base_url": "http://127.0.0.1:1/should-not-be-called",
             "size": "1280x720",
             "quality": "medium",
         },
@@ -207,7 +209,7 @@ def run_storyboard_probe(
         description = scene.get("description", "")
         prompt = scene.get("prompt", "")
         lyric_ids = scene.get("lyric_ids", [])
-        assert_condition(scene.get("image_url"), f"场景 {scene.get('scene_index')} 缺少 image_url")
+        assert_condition(not scene.get("image_url"), f"分镜阶段不应生成收费图片：{scene.get('scene_index')}")
         assert_condition(scene.get("prompt"), f"场景 {scene.get('scene_index')} 缺少 prompt")
         assert_condition("silver-haired pipa player" in prompt, f"视觉锁定主角未进入 Prompt：{scene.get('scene_index')}")
         assert_condition("cold moon white" in prompt, f"视觉锁定色调未进入 Prompt：{scene.get('scene_index')}")
@@ -280,6 +282,10 @@ def run_smoke() -> dict:
                 min_valid_lyrics=20,
             ),
         }
+        assert_condition(
+            15 <= real_lrc_summary["scenes"] <= 25,
+            f"《琵琶行》分镜数应为 15-25，实际 {real_lrc_summary['scenes']}",
+        )
 
     return {
         "sample": sample_summary,

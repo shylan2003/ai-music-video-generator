@@ -89,29 +89,29 @@ const EditorPage: React.FC = () => {
     setSelectedSceneIndex(scene.scene_index)
   }
 
-  const handleSaveProject = () => {
-    const serializedProject = serializeProject(project)
+  const handleSaveProject = async () => {
+    const serializedProject = { ...serializeProject(project), schemaVersion: 2 as const }
     const fileName = `${sanitizeFileName(project.name)}.mv-project.json`
-
-    try {
-      localStorage.setItem(`music-video-project:${project.id}`, JSON.stringify(serializedProject))
-    } catch {
-      message.warning('本地草稿缓存失败，但仍会继续下载项目文件')
+    if (window.electronAPI?.saveFile && window.electronAPI.writeTextFile) {
+      const saveResult = await window.electronAPI.saveFile({
+        title: '保存 MV 工程',
+        defaultPath: project.projectFilePath || fileName,
+        filters: [{ name: 'MV Project', extensions: ['json'] }],
+      })
+      if (saveResult?.canceled || !saveResult?.filePath) return
+      const payload = {
+        ...serializedProject,
+        projectFilePath: saveResult.filePath,
+        savedAt: new Date().toISOString(),
+      }
+      await window.electronAPI.writeTextFile(saveResult.filePath, JSON.stringify(payload, null, 2))
+      setProject({ projectFilePath: saveResult.filePath })
+      message.success('工程已保存，音乐路径和生成状态已保留')
+      return
     }
 
-    downloadJsonFile(fileName, {
-      ...serializedProject,
-      savedAt: new Date().toISOString(),
-      note: project.musicFile
-        ? '项目 JSON 不包含本地音频二进制内容，重新打开项目后请重新导入音乐文件。'
-        : undefined,
-    })
-
-    message.success(
-      project.musicFile
-        ? '项目已保存，且已下载 JSON 文件；重新打开时请重新导入音频'
-        : '项目已保存，且已下载 JSON 文件'
-    )
+    downloadJsonFile(fileName, { ...serializedProject, savedAt: new Date().toISOString() })
+    message.success('工程 JSON 已下载')
   }
 
   const handleOpenProject = async () => {
@@ -133,10 +133,14 @@ const EditorPage: React.FC = () => {
     try {
       const fileText = await window.electronAPI.readTextFile(result.filePaths[0])
       const loadedProject = normalizeLoadedProject(JSON.parse(fileText))
+      loadedProject.projectFilePath = result.filePaths[0]
+      if (loadedProject.musicFilePath && await window.electronAPI.fileExists?.(loadedProject.musicFilePath)) {
+        loadedProject.musicFile = await window.electronAPI.fileToUrl?.(loadedProject.musicFilePath)
+      }
       loadProject(loadedProject)
       setSelectedSceneIndex(null)
       setCenterTab(loadedProject.scenes.length > 0 ? 'storyboard' : 'lyrics')
-      message.success('项目已打开；如需导出，请重新导入本地音乐文件')
+      message.success(loadedProject.musicFilePath ? '项目已打开，音乐已自动恢复' : '项目已打开')
     } catch (error) {
       message.error(error instanceof Error ? error.message : '项目打开失败')
     }
@@ -224,8 +228,8 @@ const EditorPage: React.FC = () => {
           project.scenes[project.scenes.length - 1]?.end_time ??
           project.lyrics[project.lyrics.length - 1]?.time ??
           240,
-        width: 1280,
-        height: 720,
+        width: 1920,
+        height: 1080,
         fps: 30,
         motion:
           videoSettings.provider === 'local_motion'

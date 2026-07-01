@@ -1,6 +1,6 @@
 {
   "name": "music-video-generator",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AI Music Video Generator",
   "author": "AI Music Video Generator",
   "main": "dist-electron/main.js",
@@ -12,6 +12,7 @@
     "build": "vite build && tsc -p tsconfig.electron.json",
     "check": "npm run typecheck && npm run build",
     "test:e2e-storyboard": "python scripts/e2e_storyboard_smoke.py",
+    "test:lyrics": "python -m unittest scripts/test_lyrics_parser.py",
     "test:e2e-export": "python scripts/e2e_export_mv.py",
     "backend:exe": "python scripts/build_backend_exe.py",
     "pack:full": "npm run backend:exe && npm run build && electron-builder --dir",
@@ -36,7 +37,11 @@
         "from": "backend",
         "to": "backend",
         "filter": [
-          "**/*"
+          "**/*",
+          "!generated_images/**/*",
+          "!generated_videos/**/*",
+          "!**/__pycache__/**/*",
+          "!**/*.pyc"
         ]
       },
       {

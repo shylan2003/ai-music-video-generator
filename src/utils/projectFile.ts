@@ -10,11 +10,13 @@ export const normalizeLoadedProject = (payload: unknown): Project => {
   const createdAt = source.createdAt ? new Date(source.createdAt) : new Date()
 
   return {
+    schemaVersion: 2,
     id: typeof source.id === 'string' ? source.id : Date.now().toString(),
     name: typeof source.name === 'string' ? source.name : '已导入项目',
     musicName: typeof source.musicName === 'string' ? source.musicName : undefined,
-    musicFile: undefined,
-    musicFilePath: undefined,
+    musicFile: typeof source.musicFile === 'string' && !source.musicFile.startsWith('blob:') ? source.musicFile : undefined,
+    musicFilePath: typeof source.musicFilePath === 'string' ? source.musicFilePath : undefined,
+    projectFilePath: typeof source.projectFilePath === 'string' ? source.projectFilePath : undefined,
     duration: typeof source.duration === 'number' ? source.duration : undefined,
     lyrics: source.lyrics,
     scenes: source.scenes,

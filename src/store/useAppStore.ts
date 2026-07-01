@@ -19,21 +19,38 @@ export interface Scene {
   description: string
   summary?: string
   mood?: string
+  imagery?: string[]
+  character_id?: string
   visual?: string
   shot_type?: string
   camera_motion?: string
   transition?: string
   video_prompt?: string
   prompt: string
+  image_prompt?: string
   start_time: number
   end_time: number
   lyric_ids: string[]
   image_url: string
+  image_path?: string
+  video_path?: string
+  anchor_image?: string
+  generation_status?: GenerationStatus
+  error?: string
+  reuse_from?: number | null
   video_url?: string
   image_status?: GenerationStatus
   video_status?: GenerationStatus
   generation_error?: string
   video_error?: string
+}
+
+export interface CharacterProfile {
+  name: string
+  description?: string
+  wardrobe?: string
+  anchor_prompt: string
+  anchor_image?: string
 }
 
 export interface StoryAnalysis {
@@ -42,9 +59,10 @@ export interface StoryAnalysis {
   style: string
   summary: string
   director_analysis?: Record<string, unknown>
+  characters?: Record<string, CharacterProfile>
 }
 
-export type ImageProvider = 'pollinations' | 'openai' | 'custom' | 'placeholder'
+export type ImageProvider = 'tongyi' | 'pollinations' | 'openai' | 'custom' | 'placeholder'
 export type VideoProvider = 'local_motion' | 'kling' | 'runway' | 'luma' | 'custom' | 'none'
 export type GenerationStatus = 'idle' | 'queued' | 'generating' | 'done' | 'error'
 export type GenerationLogType = 'storyboard' | 'image' | 'video' | 'export'
@@ -100,6 +118,13 @@ export interface ImageGenerationSettings {
   quality: string
 }
 
+export interface DirectorSettings {
+  provider: 'deepseek' | 'rules'
+  model: string
+  apiKey: string
+  baseUrl: string
+}
+
 export interface VideoGenerationSettings {
   provider: VideoProvider
   model: string
@@ -121,8 +146,10 @@ export interface ModelTemplate {
 }
 
 export interface Project {
+  schemaVersion: 2
   id: string
   name: string
+  projectFilePath?: string
   musicFile?: string
   musicFilePath?: string
   musicName?: string
@@ -141,6 +168,7 @@ export interface Project {
 interface AppState {
   currentPage: AppPage
   project: Project
+  directorSettings: DirectorSettings
   imageSettings: ImageGenerationSettings
   videoSettings: VideoGenerationSettings
   modelTemplates: ModelTemplate[]
@@ -154,6 +182,7 @@ interface AppState {
   setScenes: (scenes: Scene[], analysis?: StoryAnalysis) => void
   setStyle: (style: string) => void
   setImageSettings: (settings: Partial<ImageGenerationSettings>) => void
+  setDirectorSettings: (settings: Partial<DirectorSettings>) => void
   setVideoSettings: (settings: Partial<VideoGenerationSettings>) => void
   setModelTemplates: (templates: ModelTemplate[]) => void
   addModelTemplate: (template: Omit<ModelTemplate, 'id'> & { id?: string }) => void
@@ -168,6 +197,7 @@ interface AppState {
 }
 
 const defaultProject: Project = {
+  schemaVersion: 2,
   id: Date.now().toString(),
   name: '未命名项目',
   lyrics: [],
@@ -179,9 +209,16 @@ const defaultProject: Project = {
   createdAt: new Date(),
 }
 
+const defaultDirectorSettings: DirectorSettings = {
+  provider: 'deepseek',
+  model: 'deepseek-chat',
+  apiKey: '',
+  baseUrl: 'https://api.deepseek.com/v1',
+}
+
 const defaultImageSettings: ImageGenerationSettings = {
-  provider: 'pollinations',
-  model: 'flux',
+  provider: 'tongyi',
+  model: 'wan2.6-image',
   apiKey: '',
   baseUrl: '',
   size: '1280x720',
@@ -199,6 +236,16 @@ const defaultVideoSettings: VideoGenerationSettings = {
 
 export const defaultModelTemplates: ModelTemplate[] = [
   {
+    id: 'image-tongyi-wan26',
+    name: '通义万相参考图',
+    kind: 'image',
+    provider: 'tongyi',
+    model: 'wan2.6-image',
+    baseUrl: 'https://dashscope.aliyuncs.com/api/v1',
+    requiresKey: true,
+    description: '默认稳定图片通道，支持角色定妆照参考图。',
+  },
+  {
     id: 'image-pollinations-free',
     name: 'Pollinations 免费图片',
     kind: 'image',
@@ -212,7 +259,7 @@ export const defaultModelTemplates: ModelTemplate[] = [
     name: 'OpenAI-compatible 图片接口',
     kind: 'image',
     provider: 'custom',
-    model: 'gpt-image-1.5',
+    model: 'gpt-image-2',
     baseUrl: 'https://api.example.com/v1',
     requiresKey: true,
     description: '兼容 /images/generations 的图片服务，可接 OpenAI 兼容代理、本地 SD/ComfyUI 包装服务。',
@@ -277,6 +324,7 @@ export const defaultModelTemplates: ModelTemplate[] = [
 export const useAppStore = create<AppState>((set) => ({
   currentPage: 'home',
   project: defaultProject,
+  directorSettings: defaultDirectorSettings,
   imageSettings: defaultImageSettings,
   videoSettings: defaultVideoSettings,
   modelTemplates: defaultModelTemplates,
@@ -297,6 +345,8 @@ export const useAppStore = create<AppState>((set) => ({
     set((state) => ({ project: { ...state.project, style } })),
   setImageSettings: (settings) =>
     set((state) => ({ imageSettings: { ...state.imageSettings, ...settings } })),
+  setDirectorSettings: (settings) =>
+    set((state) => ({ directorSettings: { ...state.directorSettings, ...settings } })),
   setVideoSettings: (settings) =>
     set((state) => ({ videoSettings: { ...state.videoSettings, ...settings } })),
   setModelTemplates: (templates) => set({ modelTemplates: templates }),

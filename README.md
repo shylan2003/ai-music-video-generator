@@ -1,6 +1,6 @@
 # AI Music Video Generator
 
-一个本地运行的 AI 音乐视频生成工具原型。桌面端使用 Electron + React + TypeScript，后端使用 FastAPI，导出由 Electron 主进程调用 ffmpeg 完成。
+一个本地运行的 AI 音乐视频生成工具。桌面端使用 Electron + React + TypeScript，后端使用 FastAPI，导出由 Electron 主进程调用 ffmpeg 完成。当前主流程已合并 `lyric-video-mvp` 的整曲导演分析、多角色定妆照和参考图生图能力。
 
 ## 技术栈
 
@@ -48,10 +48,15 @@ npm run backend
 
 ## 模型配置
 
+AI 导演默认使用 DeepSeek：只分析整首歌词、生成角色设定和 3～5 行一组的分镜，不会在分镜阶段调用图片接口。
+
+图片默认使用通义万相 `wan2.6-image`：在用户确认关键帧队列后，先为每个角色生成定妆照，再用对应参考图生成场景图。DeepSeek 与通义 API Key 均通过 Electron `safeStorage` 加密保存；系统加密不可用时不持久化密钥。
+
 软件左侧「风格 / 模型」区域可以选择图片模型、视频模型、运动方式和主视觉锁定。
 
 图片模型支持：
 
+- 通义万相：首选稳定通道，支持角色参考图。
 - Pollinations 免费：默认不需要 Key，适合快速测试。
 - OpenAI 付费：需要 OpenAI API Key，质量和稳定性通常更好。
 - OpenAI-compatible / 自定义接口：适合第三方兼容接口、本地 SD、ComfyUI 网关等。
@@ -86,6 +91,7 @@ $env:OPENAI_API_KEY="你的_openai_key"
 npm run dev                  # 启动 Vite 和 Electron
 npm run backend              # 启动 FastAPI 后端
 npm run typecheck            # TypeScript 检查
+npm run test:lyrics          # LRC / SRT / TXT 解析测试
 npm run build                # 构建前端和 Electron 主进程
 npm run check                # 类型检查 + 构建
 npm run test:e2e-storyboard  # 验证歌词过滤、短句合并、智能分镜
@@ -107,11 +113,11 @@ npm run pack:full
 
 1. 导入音乐文件和歌词文件。
 2. 选择画面风格、图片模型、视频模型和主视觉设定。
-3. 生成智能分镜：系统会过滤歌手、词曲、编曲等元信息，并把过短歌词合并到相邻可唱句，避免生成无意义画面。
-4. 根据歌词主题生成图片或视频片段，任务历史会记录参数、失败原因和重试入口。
+3. 生成智能分镜：DeepSeek 理解整首歌词并建立角色定妆、色彩与叙事约束；此时不产生图片费用。
+4. 用户确认分镜和费用提示后启动关键帧队列，角色场景自动引用对应定妆照。
 5. 在素材库中统一管理生成过的图片、视频片段和提示词版本。
 6. 预览时间线，歌词唱到哪里就显示对应画面。
-7. 导出 MP4，可选择本地动态镜头和歌词字幕。
+7. 导出 1920×1080、30fps MP4，可选择本地动态镜头、歌词字幕和云端视频片段。
 
 ## 已验证结果
 
@@ -124,6 +130,6 @@ npm run pack:full
 
 - `.mgg` / `.mgg1` 属于加密音乐格式，当前不能直接预览或导出，请先转换为 MP3。
 - Luma 通常要求关键帧图片是公网可访问的 HTTPS URL。本地图片可优先使用 Runway、本地动态或公网隧道。
-- 项目 JSON 不保存本地音频二进制内容，重新打开项目后需要重新导入音频文件。
+- 工程 V2 保存本地音频路径、分镜和生成状态；只要源文件没有移动，重新打开后可直接预览和导出。
 - 选择付费模型时，API Key 只用于本地请求和本机安全存储，不写入导出的项目 JSON。
 - 打包时如果 GitHub 下载超时，请使用上面的 Electron 和 Electron Builder 镜像变量。

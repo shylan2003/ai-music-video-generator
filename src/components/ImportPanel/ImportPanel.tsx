@@ -7,6 +7,7 @@ import {
 } from '@ant-design/icons'
 import { useAppStore, type LyricLine } from '@/store/useAppStore'
 import { mergeShortLyricLines } from '@/utils/lyrics'
+import { apiClient } from '@/api/client'
 
 const { Text, Title } = Typography
 
@@ -135,7 +136,13 @@ const ImportPanel: React.FC = () => {
   const handleLyricUpload = async (file: File) => {
     try {
       const content = await decodeLyricFile(file)
-      const parsedLyrics = parseLyrics(content)
+      const kind = getFileExtension(file.name).replace('.', '') || 'auto'
+      const response = await apiClient.post('/api/lyrics/parse', {
+        content,
+        kind,
+        duration: project.duration,
+      })
+      const parsedLyrics = response.data.lyrics as LyricLine[]
 
       if (parsedLyrics.length === 0) {
         message.error('歌词解析失败，请检查文件格式')
@@ -149,58 +156,11 @@ const ImportPanel: React.FC = () => {
           ? `成功解析 ${parsedLyrics.length} 行歌词，已合并 ${mergedCount} 行过短歌词`
           : `成功解析 ${parsedLyrics.length} 行歌词`
       )
-    } catch {
-      message.error('文件读取失败，请检查文件编码或重新保存为 UTF-8 / GBK')
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '歌词读取失败，请检查格式、时间轴或文件编码')
     }
 
     return false
-  }
-
-  // 歌词解析（支持 LRC / SRT / TXT）
-  const parseLyrics = (content: string): LyricLine[] => {
-    const lines = content.replace(/\r\n?/g, '\n').split('\n')
-    const results: LyricLine[] = []
-
-
-    // 检测是否为 LRC 格式
-    const isLrc = lines.some((line) => /\[\d+:\d+/.test(line))
-
-    if (isLrc) {
-      // LRC 解析：[mm:ss.xx] 歌词
-      lines.forEach((line, index) => {
-        const matches = [...line.matchAll(/\[(\d+):(\d+(?:\.\d+)?)\](.*)/g)]
-        matches.forEach((match) => {
-          const minutes = parseInt(match[1])
-          const seconds = parseFloat(match[2])
-          const text = match[3].trim()
-          if (text) {
-            results.push({
-              id: `lyric-${index}-${results.length}`,
-              time: minutes * 60 + seconds,
-              text,
-            })
-          }
-        })
-      })
-      // 按时间排序
-      results.sort((a, b) => a.time - b.time)
-    } else {
-      // 纯文本：每行作为一句歌词，时间均匀分布
-      let validIndex = 0
-      lines.forEach((line, index) => {
-        const text = line.trim()
-        if (text && !text.startsWith('#')) {
-          results.push({
-            id: `lyric-${index}`,
-            time: validIndex * 4,
-            text,
-          })
-          validIndex++
-        }
-      })
-    }
-
-    return results
   }
 
   return (

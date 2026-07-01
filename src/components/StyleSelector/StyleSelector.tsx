@@ -136,6 +136,13 @@ const providerOptions: Array<{
   requiresKey: boolean
 }> = [
   {
+    value: 'tongyi',
+    label: '通义万相（默认）',
+    desc: '国内稳定图片生成，支持角色定妆照参考图',
+    defaultModel: 'wan2.6-image',
+    requiresKey: true,
+  },
+  {
     value: 'pollinations',
     label: 'Pollinations 免费',
     desc: '免费社区生图，默认无需密钥；服务拥挤时可能较慢',
@@ -146,14 +153,14 @@ const providerOptions: Array<{
     value: 'openai',
     label: 'OpenAI 付费',
     desc: '质量更稳，需要 OpenAI API Key',
-    defaultModel: 'gpt-image-1.5',
+    defaultModel: 'gpt-image-2',
     requiresKey: true,
   },
   {
     value: 'custom',
     label: '自定义兼容接口',
     desc: '兼容 OpenAI Images API 的服务，需要 Base URL 和 API Key',
-    defaultModel: 'gpt-image-1.5',
+    defaultModel: 'gpt-image-2',
     requiresKey: true,
   },
   {
@@ -166,17 +173,18 @@ const providerOptions: Array<{
 ]
 
 const providerModelOptions: Record<ImageProvider, Array<{ label: string; value: string }>> = {
+  tongyi: [
+    { label: 'Wan 2.6 Image', value: 'wan2.6-image' },
+  ],
   pollinations: [
     { label: 'Flux', value: 'flux' },
     { label: 'Turbo', value: 'turbo' },
   ],
   openai: [
-    { label: 'GPT Image 1.5', value: 'gpt-image-1.5' },
-    { label: 'GPT Image 1', value: 'gpt-image-1' },
+    { label: 'GPT Image 2', value: 'gpt-image-2' },
   ],
   custom: [
-    { label: 'GPT Image 1.5', value: 'gpt-image-1.5' },
-    { label: 'GPT Image 1', value: 'gpt-image-1' },
+    { label: 'GPT Image 2', value: 'gpt-image-2' },
   ],
   placeholder: [
     { label: 'Placeholder', value: 'placeholder' },
@@ -275,10 +283,12 @@ const motionStrengthOptions = [
 const StyleSelector: React.FC = () => {
   const {
     project,
+    directorSettings,
     imageSettings,
     videoSettings,
     modelTemplates,
     setStyle,
+    setDirectorSettings,
     setImageSettings,
     setVideoSettings,
     addModelTemplate,
@@ -297,7 +307,12 @@ const StyleSelector: React.FC = () => {
     setImageSettings({
       provider,
       model: nextProvider.defaultModel,
-      baseUrl: provider === 'custom' ? imageSettings.baseUrl : '',
+      baseUrl:
+        provider === 'custom'
+          ? imageSettings.baseUrl
+          : provider === 'tongyi'
+            ? 'https://dashscope.aliyuncs.com/api/v1'
+            : '',
       apiKey: '',
     })
   }
@@ -443,6 +458,46 @@ const StyleSelector: React.FC = () => {
             )}
           </div>
         ))}
+      </div>
+
+      <Divider style={{ margin: '2px 0', borderColor: 'var(--app-border)' }} />
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <Title level={5} className="section-title">
+          AI 导演
+        </Title>
+        <div className="glass-card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Select
+            value={directorSettings.provider}
+            onChange={(provider) => setDirectorSettings({ provider })}
+            options={[
+              { label: 'DeepSeek 整曲导演（推荐）', value: 'deepseek' },
+              { label: '本地规则分镜', value: 'rules' },
+            ]}
+          />
+          {directorSettings.provider === 'deepseek' && (
+            <>
+              <Input
+                value={directorSettings.model}
+                onChange={(event) => setDirectorSettings({ model: event.target.value })}
+                placeholder="deepseek-chat"
+              />
+              <Input
+                value={directorSettings.baseUrl}
+                onChange={(event) => setDirectorSettings({ baseUrl: event.target.value })}
+                placeholder="https://api.deepseek.com/v1"
+              />
+              <Input.Password
+                value={directorSettings.apiKey}
+                onChange={(event) => setDirectorSettings({ apiKey: event.target.value })}
+                placeholder="DeepSeek API Key"
+              />
+            </>
+          )}
+          <Text style={{ color: '#64748b', fontSize: 11, lineHeight: 1.6 }}>
+            分镜阶段只生成角色设定和提示词，不会调用收费图片接口。
+          </Text>
+        </div>
       </div>
 
       <Divider style={{ margin: '2px 0', borderColor: 'var(--app-border)' }} />
@@ -752,7 +807,7 @@ const StyleSelector: React.FC = () => {
         initialValues={{
           kind: 'image',
           provider: 'custom',
-          model: 'gpt-image-1.5',
+          model: 'gpt-image-2',
           requiresKey: true,
         }}
       >
@@ -785,7 +840,7 @@ const StyleSelector: React.FC = () => {
           </Form.Item>
         </Space>
         <Form.Item label="模型 ID" name="model" rules={[{ required: true, message: '请输入模型 ID' }]}>
-          <Input placeholder="例如：gpt-image-1.5 / gen4_turbo / kling-v1-6" />
+          <Input placeholder="例如：gpt-image-2 / gen4_turbo / kling-v1-6" />
         </Form.Item>
         <Form.Item label="Base URL" name="baseUrl">
           <Input placeholder="OpenAI-compatible: https://api.example.com/v1；自定义视频：完整接口 URL" />

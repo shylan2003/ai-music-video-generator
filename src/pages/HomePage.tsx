@@ -45,9 +45,14 @@ const HomePage: React.FC = () => {
 
     try {
       const fileText = await window.electronAPI.readTextFile(result.filePaths[0])
-      loadProject(normalizeLoadedProject(JSON.parse(fileText)))
+      const loadedProject = normalizeLoadedProject(JSON.parse(fileText))
+      loadedProject.projectFilePath = result.filePaths[0]
+      if (loadedProject.musicFilePath && await window.electronAPI.fileExists?.(loadedProject.musicFilePath)) {
+        loadedProject.musicFile = await window.electronAPI.fileToUrl?.(loadedProject.musicFilePath)
+      }
+      loadProject(loadedProject)
       setCurrentPage('editor')
-      message.success('项目已打开；如需导出，请重新导入本地音乐文件')
+      message.success(loadedProject.musicFilePath ? '项目已打开，音乐已自动恢复' : '项目已打开')
     } catch (error) {
       message.error(error instanceof Error ? error.message : '项目打开失败')
     }

@@ -1,4 +1,4 @@
-import type { ImageGenerationSettings, ModelTemplate, VideoGenerationSettings } from './store/useAppStore'
+import type { DirectorSettings, ImageGenerationSettings, ModelTemplate, VideoGenerationSettings } from './store/useAppStore'
 
 export {}
 
@@ -7,12 +7,18 @@ declare global {
     electronAPI?: {
       openFile: (options: unknown) => Promise<any>
       readTextFile: (filePath: string) => Promise<string>
+      writeTextFile: (filePath: string, content: string) => Promise<boolean>
+      fileExists: (filePath: string) => Promise<boolean>
+      fileToUrl: (filePath: string) => Promise<string>
+      getBackendConfig: () => Promise<{ baseUrl: string; token: string }>
       loadModelSettings: () => Promise<{
+        directorSettings?: Partial<DirectorSettings>
         imageSettings?: Partial<ImageGenerationSettings>
         videoSettings?: Partial<VideoGenerationSettings>
         modelTemplates?: ModelTemplate[]
       }>
       saveModelSettings: (payload: {
+        directorSettings: DirectorSettings
         imageSettings: ImageGenerationSettings
         videoSettings: VideoGenerationSettings
         modelTemplates: ModelTemplate[]

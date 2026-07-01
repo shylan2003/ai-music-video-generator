@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional
@@ -17,7 +18,11 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 import httpx
 
-app = FastAPI(title="Music Video Generator API", version="1.0.0")
+from services.director import analyze_with_deepseek
+from services.lyrics_parser import parse_lyrics
+from services.tongyi_image import generate_tongyi_image
+
+app = FastAPI(title="Music Video Generator API", version="1.1.0")
 
 DATA_DIR = Path(os.getenv("MUSIC_VIDEO_DATA_DIR", Path(__file__).resolve().parent))
 GENERATED_DIR = DATA_DIR / "generated_images"
@@ -40,6 +45,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+SESSION_TOKEN = os.getenv("MUSIC_VIDEO_SESSION_TOKEN", "").strip()
+
+
+@app.middleware("http")
+async def verify_local_session(request: Request, call_next):
+    if SESSION_TOKEN and request.url.path.startswith("/api/"):
+        if request.headers.get("X-Music-Video-Token", "") != SESSION_TOKEN:
+            return JSONResponse(status_code=401, content={"detail": "本地会话令牌无效"})
+    return await call_next(request)
 
 app.mount("/generated", StaticFiles(directory=str(GENERATED_DIR)), name="generated")
 app.mount("/generated-videos", StaticFiles(directory=str(GENERATED_VIDEO_DIR)), name="generated-videos")
@@ -442,36 +457,45 @@ def get_scene_arc(index: int, total: int) -> dict:
 
 
 def build_smart_scene_groups(valid_lyrics: List["LyricLine"]) -> List[List["LyricLine"]]:
-    segments = build_segments(valid_lyrics)
-    visual_groups = build_visual_groups(valid_lyrics)
+    """把整首歌稳定分成每镜约 3-5 行，优先在停顿和完整句后切分。"""
+    if not valid_lyrics:
+        return []
+    target_count = max(1, min(25, round(len(valid_lyrics) / 4)))
+    groups: List[List["LyricLine"]] = []
+    cursor = 0
 
-    if len(segments) <= 1 and len(visual_groups) > 1:
-        return visual_groups
+    for group_index in range(target_count):
+        remaining = len(valid_lyrics) - cursor
+        remaining_groups = target_count - group_index
+        if remaining_groups == 1:
+            groups.append(valid_lyrics[cursor:])
+            break
 
-    refined: List[List["LyricLine"]] = []
-    for segment in segments:
-        if not segment:
-            continue
-        segment_groups = build_visual_groups(segment)
-        if len(segment_groups) == 1:
-            refined.append(segment_groups[0])
-            continue
+        ideal = max(1, min(5, round(remaining / remaining_groups)))
+        min_size = max(1, remaining - 5 * (remaining_groups - 1))
+        max_size = min(5, remaining - max(1, 3 * (remaining_groups - 1)))
+        if max_size < min_size:
+            max_size = min_size
 
-        current: List["LyricLine"] = []
-        for group in segment_groups:
-            if not current:
-                current = group[:]
+        best_size = min(max(ideal, min_size), max_size)
+        best_score = float("-inf")
+        for size in range(min_size, max_size + 1):
+            boundary = cursor + size
+            if boundary >= len(valid_lyrics):
                 continue
-            current_duration = group[-1].time - current[0].time
-            if len(current) + len(group) <= 5 and current_duration < 14:
-                current.extend(group)
-            else:
-                refined.append(current)
-                current = group[:]
-        if current:
-            refined.append(current)
+            left = valid_lyrics[boundary - 1]
+            right = valid_lyrics[boundary]
+            gap = max(0.0, right.time - left.time)
+            completeness = 0.7 if line_looks_complete(left.text) else 0.0
+            score = gap + completeness - abs(size - ideal) * 0.35
+            if score > best_score:
+                best_score = score
+                best_size = size
 
-    return refined or visual_groups
+        groups.append(valid_lyrics[cursor : cursor + best_size])
+        cursor += best_size
+
+    return [group for group in groups if group]
 
 
 def stable_seed(value: str) -> int:
@@ -484,11 +508,13 @@ def stable_file_stem(value: str) -> str:
 
 
 def get_public_image_url(file_path: Path) -> str:
-    return f"http://localhost:8000/generated/{file_path.name}"
+    port = int(os.getenv("MUSIC_VIDEO_BACKEND_PORT", "8000"))
+    return f"http://127.0.0.1:{port}/generated/{file_path.name}"
 
 
 def get_public_video_url(file_path: Path) -> str:
-    return f"http://localhost:8000/generated-videos/{file_path.name}"
+    port = int(os.getenv("MUSIC_VIDEO_BACKEND_PORT", "8000"))
+    return f"http://127.0.0.1:{port}/generated-videos/{file_path.name}"
 
 
 def get_public_backend_base_url() -> str:
@@ -545,17 +571,35 @@ def get_placeholder_url(seed: int, config: Optional["ImageProviderConfig"] = Non
 
 async def download_image_to_cache(url: str, file_path: Path, headers: Optional[dict[str, str]] = None) -> str:
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-        response = await client.get(url, headers=headers)
-        response.raise_for_status()
-        file_path.write_bytes(response.content)
+        async with client.stream("GET", url, headers=headers) as response:
+            response.raise_for_status()
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            size = 0
+            with file_path.open("wb") as target:
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > 40 * 1024 * 1024:
+                        target.close()
+                        file_path.unlink(missing_ok=True)
+                        raise RuntimeError("图片超过 40MB 下载限制")
+                    target.write(chunk)
     return get_public_image_url(file_path)
 
 
 async def download_video_to_cache(url: str, file_path: Path, headers: Optional[dict[str, str]] = None) -> str:
     async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
-        response = await client.get(url, headers=headers)
-        response.raise_for_status()
-        file_path.write_bytes(response.content)
+        async with client.stream("GET", url, headers=headers) as response:
+            response.raise_for_status()
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            size = 0
+            with file_path.open("wb") as target:
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > 1024 * 1024 * 1024:
+                        target.close()
+                        file_path.unlink(missing_ok=True)
+                        raise RuntimeError("视频超过 1GB 下载限制")
+                    target.write(chunk)
     return get_public_video_url(file_path)
 
 
@@ -566,6 +610,8 @@ async def image_source_to_data_uri(image_url: str) -> str:
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
         response = await client.get(image_url)
         response.raise_for_status()
+        if len(response.content) > 40 * 1024 * 1024:
+            raise RuntimeError("参考图片超过 40MB 限制")
         content_type = response.headers.get("content-type", "image/jpeg").split(";")[0]
         if not content_type.startswith("image/"):
             content_type = "image/jpeg"
@@ -589,7 +635,7 @@ async def generate_openai_image(prompt: str, cache_key: str, config: Optional["I
     if file_path.exists() and file_path.stat().st_size > 0:
         return get_public_image_url(file_path)
 
-    model = (provider_config.model or "").strip() or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
+    model = (provider_config.model or "").strip() or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
     size = get_image_size(provider_config)
     quality = (provider_config.quality or "").strip() or os.getenv("OPENAI_IMAGE_QUALITY", "medium")
     base_url = (
@@ -657,13 +703,31 @@ async def generate_pollinations_image(prompt: str, cache_key: str, config: Optio
     return await download_image_to_cache(url, file_path)
 
 
-async def generate_provider_image(prompt: str, cache_key: str, config: Optional["ImageProviderConfig"] = None) -> Optional[str]:
+async def generate_provider_image(
+    prompt: str,
+    cache_key: str,
+    config: Optional["ImageProviderConfig"] = None,
+    reference_image: str = "",
+) -> Optional[str]:
     provider_config = get_image_provider_config(config)
 
     if provider_config.provider == "placeholder":
         return None
     if provider_config.provider == "pollinations":
         return await generate_pollinations_image(prompt, cache_key, provider_config)
+    if provider_config.provider == "tongyi":
+        api_key = (provider_config.api_key or "").strip() or os.getenv("DASHSCOPE_API_KEY", "")
+        file_path = GENERATED_DIR / f"{stable_file_stem(cache_key)}.png"
+        return await generate_tongyi_image(
+            prompt=prompt,
+            output_path=file_path,
+            api_key=api_key,
+            model=(provider_config.model or "wan2.6-image").strip(),
+            base_url=(provider_config.base_url or "https://dashscope.aliyuncs.com/api/v1").strip(),
+            size=provider_config.size,
+            reference_image=reference_image,
+            public_url_for_path=get_public_image_url,
+        )
     if provider_config.provider in {"openai", "custom"}:
         return await generate_openai_image(prompt, cache_key, provider_config)
 
@@ -675,11 +739,12 @@ async def resolve_image_url(
     cache_key: str,
     placeholder_seed: int,
     config: Optional["ImageProviderConfig"] = None,
+    reference_image: str = "",
 ) -> tuple[str, bool, Optional[str]]:
     placeholder_url = get_placeholder_url(placeholder_seed, config)
 
     try:
-        image_url = await generate_provider_image(prompt, cache_key, config)
+        image_url = await generate_provider_image(prompt, cache_key, config, reference_image)
         return image_url or placeholder_url, bool(image_url), None
     except Exception as error:
         print(f"[ERROR] image generation failed: {error}")
@@ -759,6 +824,13 @@ class ImageProviderConfig(BaseModel):
     quality: str = "medium"
 
 
+class LLMProviderConfig(BaseModel):
+    provider: str = "deepseek"
+    model: str = "deepseek-chat"
+    api_key: Optional[str] = ""
+    base_url: Optional[str] = "https://api.deepseek.com/v1"
+
+
 class VideoProviderConfig(BaseModel):
     provider: str = "local_motion"
     model: str = "ken-burns"
@@ -793,6 +865,7 @@ class LyricScenesRequest(BaseModel):
     duration: Optional[float] = 240.0
     song_name: Optional[str] = ""
     image_provider: Optional[ImageProviderConfig] = None
+    llm_provider: Optional[LLMProviderConfig] = None
     visual_lock: Optional[VisualLockConfig] = None
 
 
@@ -800,8 +873,16 @@ class GenerateImageRequest(BaseModel):
     prompt: str
     scene_index: Optional[int] = 0
     lyric_id: Optional[str] = None
+    character_id: Optional[str] = ""
+    anchor_image: Optional[str] = ""
     image_provider: Optional[ImageProviderConfig] = None
     visual_lock: Optional[VisualLockConfig] = None
+
+
+class LyricsParseRequest(BaseModel):
+    content: str
+    kind: str = "auto"
+    duration: Optional[float] = None
 
 
 class GenerateVideoRequest(BaseModel):
@@ -835,6 +916,20 @@ async def health_check():
     return {"status": "ok", "message": "Backend is running"}
 
 
+@app.post("/api/lyrics/parse")
+async def parse_lyrics_endpoint(request: LyricsParseRequest):
+    try:
+        parsed = parse_lyrics(request.content, request.kind, request.duration)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {
+        "lyrics": [
+            {"id": f"lyric-{index}", "time": round(item.time, 3), "text": item.text}
+            for index, item in enumerate(parsed)
+        ]
+    }
+
+
 @app.post("/api/media/public-image")
 async def resolve_public_image(request: PublicImageRequest):
     public_url = get_luma_public_image_url(request.image_url)
@@ -864,7 +959,7 @@ async def generate_storyboard(request: StoryboardRequest):
     """按段落切分歌词，生成更细致的分镜。"""
     try:
         valid_lyrics = [
-            lyric.copy(update={"text": strip_trailing_speaker_label(lyric.text)})
+            lyric.model_copy(update={"text": strip_trailing_speaker_label(lyric.text)})
             for lyric in request.lyrics
             if not lyric.skip and not is_non_lyric(lyric.text) and lyric.text.strip()
         ]
@@ -945,7 +1040,7 @@ async def generate_storyboard(request: StoryboardRequest):
 @app.post("/api/analyze/director")
 async def analyze_director(request: LyricScenesRequest):
     valid_lyrics = [
-        lyric.copy(update={"text": strip_trailing_speaker_label(lyric.text)})
+        lyric.model_copy(update={"text": strip_trailing_speaker_label(lyric.text)})
         for lyric in request.lyrics
         if not lyric.skip and not is_non_lyric(lyric.text) and lyric.text.strip()
     ]
@@ -967,10 +1062,10 @@ async def analyze_director(request: LyricScenesRequest):
 
 @app.post("/api/generate/smart-storyboard")
 async def generate_smart_storyboard(request: LyricScenesRequest):
-    """先做导演分析，再按歌词语义和时间生成智能分镜。"""
+    """只生成导演分析和分镜结构；此阶段严禁调用收费图片接口。"""
     try:
         valid_lyrics = [
-            lyric.copy(update={"text": strip_trailing_speaker_label(lyric.text)})
+            lyric.model_copy(update={"text": strip_trailing_speaker_label(lyric.text)})
             for lyric in request.lyrics
             if not lyric.skip and not is_non_lyric(lyric.text) and lyric.text.strip()
         ]
@@ -990,60 +1085,100 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
         director_analysis = build_director_analysis(valid_lyrics, request.style, request.song_name or "")
         visual_bible = build_visual_bible(valid_lyrics, request.style, request.song_name or "", request.visual_lock)
         scene_groups = build_smart_scene_groups(valid_lyrics)
-        image_provider = get_image_provider_config(request.image_provider)
-        using_ai_images = image_provider.provider != "placeholder"
-        generated_count = 0
-        failed_count = 0
+        llm_result: Optional[dict] = None
+        llm_error = ""
+        llm_config = request.llm_provider or LLMProviderConfig()
+        llm_key = (llm_config.api_key or "").strip() or os.getenv("DEEPSEEK_API_KEY", "")
+        if llm_key and (llm_config.provider or "deepseek").lower() == "deepseek":
+            try:
+                llm_result = await analyze_with_deepseek(
+                    lyrics=[
+                        {"id": line.id, "time": line.time, "text": line.text}
+                        for line in valid_lyrics
+                    ],
+                    groups=[
+                        [{"id": line.id, "time": line.time, "text": line.text} for line in group]
+                        for group in scene_groups
+                    ],
+                    style=request.style,
+                    song_name=request.song_name or "",
+                    visual_lock=request.visual_lock.model_dump() if request.visual_lock else None,
+                    api_key=llm_key,
+                    base_url=llm_config.base_url or "https://api.deepseek.com/v1",
+                    model=llm_config.model or "deepseek-chat",
+                )
+                director_analysis = {
+                    **director_analysis,
+                    "summary": llm_result.get("summary") or director_analysis["summary"],
+                    "palette": llm_result.get("palette") or [],
+                    "negative_prompt": llm_result.get("negative_prompt") or "",
+                    "characters": llm_result.get("characters") or {},
+                    "source": "deepseek",
+                }
+            except Exception as error:
+                llm_error = str(error)
+                print(f"[WARN] DeepSeek director fallback: {error}")
+
+        if "characters" not in director_analysis:
+            fallback_characters = {}
+            if request.visual_lock and request.visual_lock.enabled and request.visual_lock.main_subject:
+                fallback_characters["main"] = {
+                    "name": "主角",
+                    "description": request.visual_lock.main_subject,
+                    "wardrobe": request.visual_lock.wardrobe or "",
+                    "anchor_prompt": build_visual_lock_text(request.visual_lock),
+                    "anchor_image": "",
+                }
+            director_analysis["characters"] = fallback_characters
+        director_analysis.setdefault("source", "rules")
+        llm_scenes = llm_result.get("scenes", []) if llm_result else []
         scenes = []
 
         for index, group in enumerate(scene_groups):
             combined_text = "，".join(line.text.strip() for line in group if line.text.strip())
-            previous_text = scene_groups[index - 1][-1].text if index > 0 else ""
-            next_text = scene_groups[index + 1][0].text if index < len(scene_groups) - 1 else ""
             start_time = 0.0 if index == 0 else group[0].time
             next_time = scene_groups[index + 1][0].time if index < len(scene_groups) - 1 else duration
             end_time = max(start_time + 0.8, next_time)
             arc = get_scene_arc(index, len(scene_groups))
-            prompt = (
-                f"Create a coherent MV storyboard keyframe. Director analysis: {director_analysis}. "
-                f"Scene arc: {arc['title']}, mood: {arc['mood']}, shot type: {arc['shot_type']}, "
-                f"camera motion: {arc['camera_motion']}. Lyric scene: '{combined_text[:180]}'. "
-                f"Previous lyric: '{previous_text[:80]}'. Next lyric: '{next_text[:80]}'. "
-                f"Continuity bible: {visual_bible}. No subtitles, no lyrics, no logo, no watermark."
+            ai_scene = llm_scenes[index] if index < len(llm_scenes) else {}
+            prompt = ai_scene.get("image_prompt") or (
+                f"{arc['mood']}，{arc['shot_type']}，画面表现：{combined_text[:180]}。"
+                f"整曲连续性设定：{visual_bible}。无字幕，无文字，无 logo，无水印。"
             )
-            video_prompt = (
-                f"{arc['camera_motion']}, {arc['shot_type']}, subtle cinematic motion, "
-                f"keep the same character, costume, palette, and environment; visualize: {combined_text[:120]}"
+            video_prompt = ai_scene.get("video_prompt") or (
+                f"{arc['camera_motion']}, subtle cinematic motion, keep character and costume unchanged"
             )
-            group_key = "|".join(f"{line.id}:{line.text}" for line in group)
-            seed = stable_seed(f"smart-storyboard-{group_key}-{request.style}-{index}")
-            image_url, generated_with_ai, image_error = await resolve_image_url(
-                prompt,
-                cache_key=f"smart-storyboard-{group_key}-{request.style}-{index}",
-                placeholder_seed=seed,
-                config=image_provider,
-            )
-            if generated_with_ai:
-                generated_count += 1
-            elif image_error:
-                failed_count += 1
+            character_id = str(ai_scene.get("character_id") or "")
+            if character_id not in director_analysis.get("characters", {}):
+                character_id = ""
 
             scenes.append({
                 "scene_index": index,
                 "title": f"镜头 {index + 1} · {arc['title']}",
                 "description": combined_text,
-                "summary": combined_text[:80],
-                "mood": arc["mood"],
+                "summary": ai_scene.get("summary") or combined_text[:80],
+                "mood": ai_scene.get("mood") or arc["mood"],
+                "imagery": ai_scene.get("imagery") or [director_analysis["visual_motif"]],
                 "visual": director_analysis["visual_motif"],
+                "character_id": character_id,
                 "shot_type": arc["shot_type"],
-                "camera_motion": arc["camera_motion"],
-                "transition": arc["transition"],
+                "camera_motion": ai_scene.get("camera_motion") or arc["camera_motion"],
+                "transition": ai_scene.get("transition") or arc["transition"],
                 "video_prompt": video_prompt,
                 "prompt": prompt,
+                "image_prompt": prompt,
                 "start_time": start_time,
                 "end_time": end_time,
                 "lyric_ids": [line.id for line in group],
-                "image_url": image_url,
+                "image_url": "",
+                "image_path": "",
+                "video_path": "",
+                "anchor_image": "",
+                "image_status": "idle",
+                "video_status": "idle",
+                "generation_status": "idle",
+                "error": "",
+                "reuse_from": ai_scene.get("reuse_from"),
             })
 
         analysis = {
@@ -1051,10 +1186,11 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
             "valid_lyrics": len(valid_lyrics),
             "style": request.style,
             "director_analysis": director_analysis,
+            "characters": director_analysis.get("characters", {}),
             "summary": (
-                f"已完成 AI 导演分析，生成 {len(scenes)} 个智能镜头，覆盖 {len(valid_lyrics)} 行歌词"
-                + (f"；AI 生成关键帧 {generated_count}/{len(scenes)} 张" if using_ai_images else "；当前使用占位图模式")
-                + (f"，{failed_count} 张失败后使用占位图" if failed_count else "")
+                f"已生成 {len(scenes)} 个待确认分镜，覆盖 {len(valid_lyrics)} 行歌词；"
+                "尚未调用任何收费图片接口"
+                + (f"；DeepSeek 不可用已回退规则分析：{llm_error[:120]}" if llm_error else "")
             ),
         }
 
@@ -1077,7 +1213,7 @@ async def generate_lyric_scenes(request: LyricScenesRequest):
     """逐句生成分镜：每句有效歌词对应一张画面，并按歌词时间戳对齐。"""
     try:
         valid_lyrics = [
-            lyric.copy(update={"text": strip_trailing_speaker_label(lyric.text)})
+            lyric.model_copy(update={"text": strip_trailing_speaker_label(lyric.text)})
             for lyric in request.lyrics
             if not lyric.skip and not is_non_lyric(lyric.text) and lyric.text.strip()
         ]
@@ -1176,7 +1312,7 @@ async def generate_prompt(request: GeneratePromptRequest):
 async def generate_batch(request: BatchGenerateRequest):
     results = []
     valid_lyrics = [
-        line.copy(update={"text": strip_trailing_speaker_label(line.text)})
+        line.model_copy(update={"text": strip_trailing_speaker_label(line.text)})
         for line in request.lyrics
         if not line.skip and line.text.strip()
     ]
@@ -1217,12 +1353,22 @@ async def generate_image(request: GenerateImageRequest):
     try:
         seed = stable_seed(request.prompt)
         prompt = append_visual_lock_to_prompt(request.prompt, request.visual_lock)
-        image_url, _, _ = await resolve_image_url(
-            prompt,
-            cache_key=f"single-{request.scene_index}-{request.lyric_id or ''}-{prompt}",
-            placeholder_seed=seed,
-            config=request.image_provider,
+        provider_config = get_image_provider_config(request.image_provider)
+        cache_key = (
+            f"single-{request.scene_index}-{request.lyric_id or ''}-"
+            f"{request.character_id or ''}-{request.anchor_image or ''}-{prompt}"
         )
+        if provider_config.provider == "placeholder":
+            image_url = get_placeholder_url(seed, provider_config)
+        else:
+            image_url = await generate_provider_image(
+                prompt,
+                cache_key,
+                provider_config,
+                request.anchor_image or "",
+            )
+            if not image_url:
+                raise RuntimeError(f"{provider_config.provider} 未返回图片")
         return {
             "image_url": image_url,
             "scene_index": request.scene_index,
@@ -1231,7 +1377,7 @@ async def generate_image(request: GenerateImageRequest):
         }
     except Exception as e:
         print(f"[ERROR] generate_image: {e}")
-        return {"image_url": "", "scene_index": request.scene_index, "prompt": request.prompt}
+        raise HTTPException(status_code=502, detail=f"图片生成失败：{e}") from e
 
 
 def get_runway_model(model: str) -> str:
@@ -1677,12 +1823,6 @@ async def generate_video(request: GenerateVideoRequest):
 
     if provider == "kling":
         return await generate_kling_video(request, provider_config, duration)
-        if not provider_config.api_key:
-            raise HTTPException(status_code=400, detail=f"{provider_config.provider} 需要 API key")
-        raise HTTPException(
-            status_code=501,
-            detail=f"{provider_config.provider} 视频 API 协议尚未接入，请先使用本地动态或自定义 Base URL",
-        )
 
     raise HTTPException(status_code=400, detail=f"未知视频提供商：{provider_config.provider}")
 
@@ -1692,6 +1832,6 @@ if __name__ == "__main__":
     reload_enabled = os.getenv("MUSIC_VIDEO_RELOAD", "1") == "1" and not is_frozen
     port = int(os.getenv("MUSIC_VIDEO_BACKEND_PORT", "8000"))
     if reload_enabled:
-        uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+        uvicorn.run("main:app", host="127.0.0.1", port=port, reload=True)
     else:
-        uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
+        uvicorn.run(app, host="127.0.0.1", port=port, reload=False)

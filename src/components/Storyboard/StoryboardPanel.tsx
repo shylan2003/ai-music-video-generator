@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Typography, Button, Drawer, Empty, Form, Input, Select, Space, Switch, Tabs, Tag, Tooltip, message } from 'antd'
+import { Typography, Button, Drawer, Empty, Form, Input, Modal, Select, Space, Switch, Tabs, Tag, Tooltip, message } from 'antd'
 import {
   ThunderboltOutlined,
   ReloadOutlined,
@@ -17,7 +17,8 @@ import {
   LockOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
-import { useAppStore, type GenerationLog, type GenerationStatus, type LyricLine, type ProjectAsset, type Scene, type StoryAnalysis, type VisualLockSettings } from '@/store/useAppStore'
+import { apiClient } from '@/api/client'
+import { useAppStore, type GenerationLog, type GenerationStatus, type ImageGenerationSettings, type LyricLine, type ProjectAsset, type Scene, type StoryAnalysis, type VisualLockSettings } from '@/store/useAppStore'
 
 
 const { Text, Title } = Typography
@@ -179,6 +180,27 @@ const toBackendVisualLock = (visualLock?: VisualLockSettings) => ({
   symbols: visualLock?.symbols || '',
   negative_prompt: visualLock?.negativePrompt || '',
 })
+
+const toBackendImageProvider = (settings: ImageGenerationSettings) => ({
+  provider: settings.provider,
+  model: settings.model,
+  api_key: settings.apiKey,
+  base_url: settings.baseUrl,
+  size: settings.size,
+  quality: settings.quality,
+})
+
+const confirmPaidImageQueue = (count: number) =>
+  new Promise<boolean>((resolve) => {
+    Modal.confirm({
+      title: '确认生成关键帧',
+      content: `将提交 ${count} 个分镜的图片任务，并可能额外生成角色定妆照。云端平台可能收费。`,
+      okText: '确认生成',
+      cancelText: '取消',
+      onOk: () => resolve(true),
+      onCancel: () => resolve(false),
+    })
+  })
 
 interface Props {
   onSceneSelect: (scene: Scene) => void
@@ -664,6 +686,7 @@ const getGenerationEstimate = (
 const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex }) => {
   const {
     project,
+    directorSettings,
     imageSettings,
     videoSettings,
     isGenerating,
@@ -978,12 +1001,18 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
     message.loading({ content: 'AI 导演正在分析歌词并生成智能分镜...', key: 'storyboard' })
 
     try {
-      const res = await axios.post('http://localhost:8000/api/generate/smart-storyboard', {
+      const res = await apiClient.post('/api/generate/smart-storyboard', {
         lyrics: project.lyrics,
         style: project.style,
         duration: project.duration || 240,
         song_name: project.musicName || '',
-        image_provider: imageSettings,
+        image_provider: toBackendImageProvider(imageSettings),
+        llm_provider: {
+          provider: directorSettings.provider,
+          model: directorSettings.model,
+          api_key: directorSettings.apiKey,
+          base_url: directorSettings.baseUrl,
+        },
         visual_lock: toBackendVisualLock(project.visualLock),
       })
 
@@ -1094,10 +1123,10 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       setScenes(nextScenes, project.analysis)
 
       try {
-        const res = await axios.post('http://localhost:8000/api/generate/image', {
+        const res = await apiClient.post('/api/generate/image', {
           prompt: scene.prompt,
           scene_index: scene.scene_index,
-          image_provider: imageSettings,
+          image_provider: toBackendImageProvider(imageSettings),
           visual_lock: toBackendVisualLock(project.visualLock),
         })
 
@@ -1155,16 +1184,63 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       return
     }
 
+    if (!['placeholder', 'pollinations'].includes(imageSettings.provider)) {
+      const confirmed = await confirmPaidImageQueue(targetIndexes.size)
+      if (!confirmed) return
+    }
+
     imageQueueCancelRef.current = false
     setImageQueueRunning(true)
     let failedCount = 0
+    let nextAnalysis = project.analysis
+      ? { ...project.analysis, characters: { ...(project.analysis.characters ?? {}) } }
+      : undefined
     let nextScenes: Scene[] = reindexScenes([...project.scenes]).map((scene) =>
       targetIndexes.has(scene.scene_index)
         ? { ...scene, image_status: 'queued' as GenerationStatus, generation_error: undefined }
         : scene
     )
 
-    setScenes(nextScenes, project.analysis)
+    const requiredCharacterIds = Array.from(new Set(
+      nextScenes
+        .filter((scene) => targetIndexes.has(scene.scene_index) && scene.character_id)
+        .map((scene) => scene.character_id as string)
+    ))
+    for (const characterId of requiredCharacterIds) {
+      const character = nextAnalysis?.characters?.[characterId]
+      if (!character || character.anchor_image) continue
+      try {
+        const anchorResponse = await apiClient.post('/api/generate/image', {
+          prompt: character.anchor_prompt,
+          scene_index: -1,
+          character_id: characterId,
+          image_provider: toBackendImageProvider(imageSettings),
+          visual_lock: toBackendVisualLock(project.visualLock),
+        })
+        nextAnalysis = {
+          ...nextAnalysis!,
+          characters: {
+            ...nextAnalysis!.characters,
+            [characterId]: { ...character, anchor_image: anchorResponse.data.image_url },
+          },
+        }
+        addProjectAsset({
+          type: 'image',
+          title: `角色定妆照 · ${character.name || characterId}`,
+          url: anchorResponse.data.image_url,
+          prompt: character.anchor_prompt,
+          provider: imageSettings.provider,
+          model: imageSettings.model,
+          source: 'queue',
+        })
+      } catch (error) {
+        setImageQueueRunning(false)
+        message.error(`角色定妆照生成失败：${getErrorMessage(error)}`)
+        return
+      }
+    }
+
+    setScenes(nextScenes, nextAnalysis)
     message.loading({ content: `关键帧队列已开始，共 ${targetIndexes.size} 个镜头`, key: 'image-queue' })
 
     for (const scene of nextScenes.filter((item) => targetIndexes.has(item.scene_index))) {
@@ -1178,15 +1254,19 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
           ? { ...item, image_status: 'generating' as GenerationStatus, generation_error: undefined }
           : item
       )
-      setScenes(nextScenes, project.analysis)
+      setScenes(nextScenes, nextAnalysis)
 
       try {
         const controller = new AbortController()
         imageQueueAbortRef.current = controller
-        const res = await axios.post('http://localhost:8000/api/generate/image', {
+        const res = await apiClient.post('/api/generate/image', {
           prompt: scene.prompt,
           scene_index: scene.scene_index,
-          image_provider: imageSettings,
+          character_id: scene.character_id || '',
+          anchor_image: scene.character_id
+            ? nextAnalysis?.characters?.[scene.character_id]?.anchor_image || ''
+            : '',
+          image_provider: toBackendImageProvider(imageSettings),
           visual_lock: toBackendVisualLock(project.visualLock),
         }, { signal: controller.signal })
         imageQueueAbortRef.current = null
@@ -1244,7 +1324,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
               ? { ...item, image_status: 'idle' as GenerationStatus, generation_error: undefined }
               : item
           )
-          setScenes(nextScenes, project.analysis)
+          setScenes(nextScenes, nextAnalysis)
           break
         }
 
@@ -1268,7 +1348,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
         )
       }
 
-      setScenes(nextScenes, project.analysis)
+      setScenes(nextScenes, nextAnalysis)
     }
 
     const wasCanceled = imageQueueCancelRef.current
@@ -1281,7 +1361,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
           ? { ...item, image_status: 'idle' as GenerationStatus, generation_error: undefined }
           : item
       )
-      setScenes(nextScenes, project.analysis)
+      setScenes(nextScenes, nextAnalysis)
     }
 
     setImageQueueRunning(false)
@@ -1340,7 +1420,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       }
 
       try {
-        const res = await axios.post('http://localhost:8000/api/generate/video', {
+        const res = await apiClient.post('/api/generate/video', {
           prompt: scene.video_prompt || scene.prompt,
           image_url: scene.image_url,
           scene_index: scene.scene_index,
@@ -1462,7 +1542,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       try {
         const controller = new AbortController()
         videoQueueAbortRef.current = controller
-        const res = await axios.post('http://localhost:8000/api/generate/video', {
+        const res = await apiClient.post('/api/generate/video', {
           prompt: scene.video_prompt || scene.prompt,
           image_url: scene.image_url,
           scene_index: scene.scene_index,
@@ -1594,10 +1674,10 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
     markScene({ image_status: 'generating', generation_error: undefined })
 
     try {
-      const res = await axios.post('http://localhost:8000/api/generate/image', {
+      const res = await apiClient.post('/api/generate/image', {
           prompt: scene.prompt,
           scene_index: scene.scene_index,
-          image_provider: imageSettings,
+          image_provider: toBackendImageProvider(imageSettings),
           visual_lock: toBackendVisualLock(project.visualLock),
         })
       addGenerationLog({

@@ -2,16 +2,18 @@ import React, { useEffect, useRef } from 'react'
 import { useAppStore } from './store/useAppStore'
 import HomePage from './pages/HomePage'
 import EditorPage from './pages/EditorPage'
-import axios from 'axios'
+import { apiClient, configureApiClient } from './api/client'
 
 const App: React.FC = () => {
   const {
     currentPage,
+    directorSettings,
     imageSettings,
     videoSettings,
     modelTemplates,
     setBackendStatus,
     setImageSettings,
+    setDirectorSettings,
     setVideoSettings,
     setModelTemplates,
   } = useAppStore()
@@ -21,7 +23,8 @@ const App: React.FC = () => {
   useEffect(() => {
     const checkBackend = async () => {
       try {
-        await axios.get('http://localhost:8000/health', { timeout: 3000 })
+        await configureApiClient()
+        await apiClient.get('/health', { timeout: 3000 })
         setBackendStatus('online')
       } catch {
         setBackendStatus('offline')
@@ -47,6 +50,9 @@ const App: React.FC = () => {
           return
         }
 
+        if (settings.directorSettings) {
+          setDirectorSettings(settings.directorSettings)
+        }
         if (settings.imageSettings) {
           setImageSettings(settings.imageSettings)
         }
@@ -68,7 +74,7 @@ const App: React.FC = () => {
     return () => {
       disposed = true
     }
-  }, [setImageSettings, setModelTemplates, setVideoSettings])
+  }, [setDirectorSettings, setImageSettings, setModelTemplates, setVideoSettings])
 
   useEffect(() => {
     if (!modelSettingsLoadedRef.current || !window.electronAPI?.saveModelSettings) {
@@ -77,6 +83,7 @@ const App: React.FC = () => {
 
     const timer = window.setTimeout(() => {
       window.electronAPI?.saveModelSettings({
+        directorSettings,
         imageSettings,
         videoSettings,
         modelTemplates,
@@ -86,7 +93,7 @@ const App: React.FC = () => {
     }, 500)
 
     return () => window.clearTimeout(timer)
-  }, [imageSettings, modelTemplates, videoSettings])
+  }, [directorSettings, imageSettings, modelTemplates, videoSettings])
 
   return (
     <div style={{ width: '100vw', height: '100vh', overflow: 'hidden' }}>

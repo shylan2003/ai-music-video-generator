@@ -2,8 +2,12 @@ import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron'
 import path from 'path'
 import os from 'os'
 import fs from 'fs/promises'
-import { existsSync } from 'fs'
+import { createWriteStream, existsSync } from 'fs'
+import { Transform } from 'stream'
+import { pipeline } from 'stream/promises'
 import { spawn, ChildProcess } from 'child_process'
+import { randomBytes } from 'crypto'
+import { pathToFileURL } from 'url'
 import axios from 'axios'
 import ffmpegPath from 'ffmpeg-static'
 
@@ -18,6 +22,7 @@ const ffmpegInstallerPath = (() => {
 const isDev = !app.isPackaged
 let mainWindow: BrowserWindow | null = null
 let backendProcess: ChildProcess | null = null
+const backendSessionToken = randomBytes(32).toString('hex')
 
 interface ExportScene {
   scene_index: number
@@ -57,6 +62,7 @@ interface ExportProgressPayload {
 }
 
 type PersistedModelSettings = {
+  directorSettings?: Record<string, unknown>
   imageSettings?: Record<string, unknown>
   videoSettings?: Record<string, unknown>
   modelTemplates?: Array<Record<string, unknown>>
@@ -90,6 +96,10 @@ function normalizeModelSettings(payload: unknown): PersistedModelSettings {
   const source = payload as PersistedModelSettings
   const nextSettings: PersistedModelSettings = {}
 
+  if (source.directorSettings && typeof source.directorSettings === 'object') {
+    nextSettings.directorSettings = source.directorSettings
+  }
+
   if (source.imageSettings && typeof source.imageSettings === 'object') {
     nextSettings.imageSettings = source.imageSettings
   }
@@ -111,10 +121,8 @@ function encryptApiKey(value: unknown) {
   }
 
   if (!safeStorage.isEncryptionAvailable()) {
-    return {
-      algorithm: 'plain',
-      value,
-    }
+    console.warn('Electron safeStorage is unavailable; API key will not be persisted')
+    return undefined
   }
 
   return {
@@ -131,10 +139,6 @@ function decryptApiKey(value: unknown) {
   const source = value as { algorithm?: unknown; value?: unknown }
   if (typeof source.value !== 'string') {
     return undefined
-  }
-
-  if (source.algorithm === 'plain') {
-    return source.value
   }
 
   if (source.algorithm !== 'electron-safe-storage') {
@@ -183,6 +187,7 @@ function revealProviderSettings(settings?: Record<string, unknown>) {
 
 function protectModelSettings(settings: PersistedModelSettings): PersistedModelSettings {
   return {
+    directorSettings: protectProviderSettings(settings.directorSettings),
     imageSettings: protectProviderSettings(settings.imageSettings),
     videoSettings: protectProviderSettings(settings.videoSettings),
     modelTemplates: settings.modelTemplates,
@@ -191,6 +196,7 @@ function protectModelSettings(settings: PersistedModelSettings): PersistedModelS
 
 function revealModelSettings(settings: PersistedModelSettings): PersistedModelSettings {
   return {
+    directorSettings: revealProviderSettings(settings.directorSettings),
     imageSettings: revealProviderSettings(settings.imageSettings),
     videoSettings: revealProviderSettings(settings.videoSettings),
     modelTemplates: settings.modelTemplates,
@@ -309,14 +315,14 @@ async function createSubtitleFile(tempDir: string, request: ExportRequest) {
   const header = [
     '[Script Info]',
     'ScriptType: v4.00+',
-    'PlayResX: 1280',
-    'PlayResY: 720',
+    'PlayResX: 1920',
+    'PlayResY: 1080',
     'WrapStyle: 2',
     'ScaledBorderAndShadow: yes',
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    'Style: Default,Microsoft YaHei,38,&H00FFFFFF,&H00FFFFFF,&HAA000000,&H66000000,0,0,0,0,100,100,0,0,1,2,1,2,72,72,52,1',
+    'Style: Default,Microsoft YaHei,52,&H00FFFFFF,&H00FFFFFF,&HA0000000,&H30000000,0,0,0,0,100,100,1,0,1,2,1,2,100,100,78,1',
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
@@ -332,13 +338,28 @@ async function createSubtitleFile(tempDir: string, request: ExportRequest) {
   return subtitlePath
 }
 
+async function downloadToFile(source: string, targetPath: string, maxBytes: number, timeout: number) {
+  const response = await axios.get(source, { responseType: 'stream', timeout, maxRedirects: 5 })
+  let received = 0
+  const limiter = new Transform({
+    transform(chunk, _encoding, callback) {
+      received += chunk.length
+      if (received > maxBytes) {
+        callback(new Error(`下载文件超过 ${Math.round(maxBytes / 1024 / 1024)}MB 限制`))
+        return
+      }
+      callback(null, chunk)
+    },
+  })
+  await pipeline(response.data, limiter, createWriteStream(targetPath))
+}
+
 async function materializeSceneImage(source: string, tempDir: string, index: number) {
   const extension = getImageExtension(source)
   const targetPath = path.join(tempDir, `scene-${String(index + 1).padStart(4, '0')}${extension}`)
 
   if (/^https?:\/\//i.test(source)) {
-    const response = await axios.get<ArrayBuffer>(source, { responseType: 'arraybuffer', timeout: 30000 })
-    await fs.writeFile(targetPath, Buffer.from(response.data))
+    await downloadToFile(source, targetPath, 40 * 1024 * 1024, 30000)
     return targetPath
   }
 
@@ -370,8 +391,7 @@ async function materializeSceneVideo(source: string, tempDir: string, index: num
   const targetPath = path.join(tempDir, `source-video-${String(index + 1).padStart(4, '0')}${extension}`)
 
   if (/^https?:\/\//i.test(source)) {
-    const response = await axios.get<ArrayBuffer>(source, { responseType: 'arraybuffer', timeout: 120000 })
-    await fs.writeFile(targetPath, Buffer.from(response.data))
+    await downloadToFile(source, targetPath, 1024 * 1024 * 1024, 120000)
     return targetPath
   }
 
@@ -432,25 +452,27 @@ function getMotionZoomStep(motion: ExportRequest['motion']) {
 function getSceneMotionFilter(scene: ExportScene, request: ExportRequest, width: number, height: number, fps: number) {
   const motion = request.motion ?? 'none'
   const base = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
+  const duration = getSafeDuration(scene)
+  const fadeDuration = Math.min(0.35, duration / 4)
+  const fade = `fade=t=in:st=0:d=${fadeDuration.toFixed(3)},fade=t=out:st=${Math.max(0, duration - fadeDuration).toFixed(3)}:d=${fadeDuration.toFixed(3)}`
 
   if (motion === 'none') {
-    return `fps=${fps},${base},format=yuv420p`
+    return `fps=${fps},${base},${fade},format=yuv420p`
   }
 
-  const duration = getSafeDuration(scene)
   const frames = Math.max(1, Math.round(duration * fps))
   const zoomStep = getMotionZoomStep(motion)
   const cameraMotion = (scene.camera_motion ?? '').toLowerCase()
 
   if (cameraMotion.includes('pull back')) {
-    return `${base},zoompan=z='max(1.0,1.08-on*${zoomStep})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps},format=yuv420p`
+    return `${base},zoompan=z='max(1.0,1.08-on*${zoomStep})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps},${fade},format=yuv420p`
   }
 
   if (cameraMotion.includes('lateral') || cameraMotion.includes('tracking')) {
-    return `${base},zoompan=z='1.06':x='(iw-iw/zoom)*(on/${frames})':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps},format=yuv420p`
+    return `${base},zoompan=z='1.06':x='(iw-iw/zoom)*(on/${frames})':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps},${fade},format=yuv420p`
   }
 
-  return `${base},zoompan=z='min(1.1,1+on*${zoomStep})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps},format=yuv420p`
+  return `${base},zoompan=z='min(1.1,1+on*${zoomStep})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps},${fade},format=yuv420p`
 }
 
 function runFfmpeg(
@@ -780,8 +802,8 @@ async function exportVideo(request: ExportRequest) {
 
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'music-video-export-'))
   const totalDuration = getTotalDuration(request)
-  const width = request.width ?? 1280
-  const height = request.height ?? 720
+    const width = request.width ?? 1920
+    const height = request.height ?? 1080
   const fps = request.fps ?? 30
 
   sendExportProgress({ stage: 'prepare', progress: 2, message: '正在准备导出素材...' })
@@ -957,7 +979,7 @@ function startBackend() {
   const backendScriptPath = isDev
     ? path.join(__dirname, '../backend/main.py')
     : path.join(process.resourcesPath, 'backend/main.py')
-  const useBackendExe = existsSync(backendExePath)
+  const useBackendExe = !isDev && existsSync(backendExePath)
   const backendCommand = useBackendExe ? backendExePath : 'python'
   const backendArgs = useBackendExe ? [] : [backendScriptPath]
 
@@ -968,6 +990,7 @@ function startBackend() {
       ...process.env,
       MUSIC_VIDEO_DATA_DIR: path.join(app.getPath('userData'), 'backend-data'),
       MUSIC_VIDEO_RELOAD: '0',
+      MUSIC_VIDEO_SESSION_TOKEN: backendSessionToken,
     },
   })
 
@@ -1042,6 +1065,31 @@ ipcMain.handle('file:readText', async (_, filePath: string) => {
 
   return fs.readFile(filePath, 'utf8')
 })
+
+ipcMain.handle('file:writeText', async (_, filePath: string, content: string) => {
+  if (!filePath || !path.isAbsolute(filePath) || typeof content !== 'string') {
+    throw new Error('写入文件参数无效')
+  }
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+  await fs.writeFile(filePath, content, 'utf8')
+  return true
+})
+
+ipcMain.handle('file:exists', async (_, filePath: string) => {
+  return Boolean(filePath && path.isAbsolute(filePath) && existsSync(filePath))
+})
+
+ipcMain.handle('file:toUrl', async (_, filePath: string) => {
+  if (!filePath || !path.isAbsolute(filePath)) {
+    throw new Error('文件路径无效')
+  }
+  return pathToFileURL(filePath).toString()
+})
+
+ipcMain.handle('backend:config', async () => ({
+  baseUrl: 'http://127.0.0.1:8000',
+  token: backendSessionToken,
+}))
 
 ipcMain.handle('settings:load', async () => {
   try {
