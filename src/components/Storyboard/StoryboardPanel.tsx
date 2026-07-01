@@ -1,0 +1,2450 @@
+import React, { useEffect, useRef, useState } from 'react'
+import { Typography, Button, Drawer, Empty, Form, Input, Select, Space, Switch, Tabs, Tag, Tooltip, message } from 'antd'
+import {
+  ThunderboltOutlined,
+  ReloadOutlined,
+  InfoCircleOutlined,
+  EditOutlined,
+  CompressOutlined,
+  SplitCellsOutlined,
+  VideoCameraOutlined,
+  StopOutlined,
+  HistoryOutlined,
+  DeleteOutlined,
+  AppstoreOutlined,
+  CopyOutlined,
+  EyeOutlined,
+  LockOutlined,
+} from '@ant-design/icons'
+import axios from 'axios'
+import { useAppStore, type GenerationLog, type GenerationStatus, type LyricLine, type ProjectAsset, type Scene, type StoryAnalysis, type VisualLockSettings } from '@/store/useAppStore'
+
+
+const { Text, Title } = Typography
+
+const styleColors: Record<string, string> = {
+  cinematic: '#4fc3f7',
+  ornate_gufeng: '#fbbf24',
+  song_landscape: '#a7f3d0',
+  tang_mural: '#fdba74',
+  xianxia: '#c4b5fd',
+  guofeng_cinematic: '#d1d5db',
+  stage_opera: '#fca5a5',
+  cyberpunk: '#ff0099',
+  inkwash: '#e8d5b7',
+  anime: '#ff9ecd',
+  realistic: '#7eb8f7',
+  abstract: '#c084fc',
+  dark_fantasy: '#818cf8',
+  retro_film: '#facc15',
+  stage_lighting: '#5eead4',
+}
+
+const shotTypeOptions = [
+  { label: '远景 / 建立镜头', value: 'wide establishing shot' },
+  { label: '中景 / 叙事镜头', value: 'medium narrative shot' },
+  { label: '近景 / 情绪特写', value: 'dramatic close-up or dynamic medium shot' },
+  { label: '收束远景 / 剪影', value: 'wide closing shot with strong silhouette' },
+]
+
+const cameraMotionOptions = [
+  { label: '慢慢推近', value: 'slow dolly in' },
+  { label: '横向跟拍', value: 'gentle lateral tracking' },
+  { label: '缓慢推近 + 视差', value: 'slow push-in with subtle parallax' },
+  { label: '缓慢拉远', value: 'slow pull back' },
+]
+
+const transitionOptions = [
+  { label: '柔和叠化', value: 'soft dissolve' },
+  { label: '匹配剪辑', value: 'match cut' },
+  { label: '节奏切换', value: 'rhythmic cut' },
+  { label: '淡出', value: 'fade out' },
+]
+
+const reindexScenes = (scenes: Scene[]) =>
+  scenes
+    .sort((a, b) => a.start_time - b.start_time)
+    .map((scene, index) => ({
+      ...scene,
+      scene_index: index,
+    }))
+
+const combineUnique = (left: string[], right: string[]) => Array.from(new Set([...left, ...right]))
+
+const imageStatusMeta: Record<GenerationStatus, { color: string; label: string }> = {
+  idle: { color: 'default', label: '待生成' },
+  queued: { color: 'warning', label: '排队中' },
+  generating: { color: 'processing', label: '生成中' },
+  done: { color: 'success', label: '已完成' },
+  error: { color: 'error', label: '失败' },
+}
+
+const videoStatusMeta: Record<GenerationStatus, { color: string; label: string }> = {
+  idle: { color: 'default', label: '视频待生成' },
+  queued: { color: 'warning', label: '视频排队' },
+  generating: { color: 'processing', label: '视频生成中' },
+  done: { color: 'success', label: '视频已就绪' },
+  error: { color: 'error', label: '视频失败' },
+}
+
+const getErrorMessage = (error: unknown) => {
+  if (axios.isAxiosError(error)) {
+    return error.response?.data?.detail || error.message || '生成失败'
+  }
+
+  return error instanceof Error ? error.message : '生成失败'
+}
+
+const formatDurationMs = (durationMs?: number) => {
+  if (!durationMs || durationMs < 0) {
+    return ''
+  }
+  if (durationMs < 1000) {
+    return `${durationMs} ms`
+  }
+  return `${(durationMs / 1000).toFixed(1)} s`
+}
+
+const formatLogTime = (value: string) => {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+  return date.toLocaleString()
+}
+
+const logTypeLabel: Record<GenerationLog['type'], string> = {
+  storyboard: '智能分镜',
+  image: '关键帧',
+  video: '视频片段',
+  export: '导出',
+}
+
+const logStatusMeta: Record<GenerationLog['status'], { color: string; label: string }> = {
+  success: { color: 'success', label: '成功' },
+  error: { color: 'error', label: '失败' },
+  canceled: { color: 'default', label: '已取消' },
+}
+
+const assetTypeLabel: Record<ProjectAsset['type'], string> = {
+  image: '图片',
+  video: '视频',
+  prompt: 'Prompt',
+}
+
+const copyToClipboard = async (value?: string) => {
+  if (!value) {
+    message.warning('没有可复制的内容')
+    return
+  }
+
+  try {
+    await navigator.clipboard.writeText(value)
+    message.success('已复制')
+  } catch {
+    message.error('复制失败，请手动选择文本复制')
+  }
+}
+
+const getVisualLockText = (visualLock?: VisualLockSettings) => {
+  if (!visualLock?.enabled) {
+    return ''
+  }
+
+  const parts = [
+    visualLock.mainSubject ? `main subject: ${visualLock.mainSubject}` : '',
+    visualLock.wardrobe ? `wardrobe and appearance: ${visualLock.wardrobe}` : '',
+    visualLock.setting ? `fixed setting: ${visualLock.setting}` : '',
+    visualLock.palette ? `locked palette and lighting: ${visualLock.palette}` : '',
+    visualLock.symbols ? `recurring symbols: ${visualLock.symbols}` : '',
+    visualLock.negativePrompt ? `avoid: ${visualLock.negativePrompt}` : '',
+  ].filter(Boolean)
+
+  return parts.length
+    ? `User visual continuity lock, higher priority than automatic interpretation: ${parts.join('; ')}.`
+    : ''
+}
+
+const appendVisualLock = (prompt: string, visualLock?: VisualLockSettings) => {
+  const lockText = getVisualLockText(visualLock)
+  return lockText ? `${prompt} ${lockText}` : prompt
+}
+
+const toBackendVisualLock = (visualLock?: VisualLockSettings) => ({
+  enabled: Boolean(visualLock?.enabled),
+  main_subject: visualLock?.mainSubject || '',
+  wardrobe: visualLock?.wardrobe || '',
+  setting: visualLock?.setting || '',
+  palette: visualLock?.palette || '',
+  symbols: visualLock?.symbols || '',
+  negative_prompt: visualLock?.negativePrompt || '',
+})
+
+interface Props {
+  onSceneSelect: (scene: Scene) => void
+  selectedSceneIndex: number | null
+}
+
+const stringHash = (value: string) =>
+  Array.from(value).reduce((hash, char) => ((hash << 5) - hash + char.charCodeAt(0)) | 0, 0)
+
+const MIN_SEGMENT_LINES = 3
+const IDEAL_SEGMENT_LINES = 4
+const MAX_SEGMENT_LINES = 5
+const BASE_HARD_PAUSE = 2.2
+const BASE_SOFT_PAUSE = 1.6
+const MIN_VISUAL_TEXT_LENGTH = 8
+const MAX_VISUAL_GROUP_LINES = 3
+const MAX_VISUAL_GROUP_TEXT_LENGTH = 36
+
+const styleKeywords: Record<string, string> = {
+  cinematic: 'cinematic lighting, film grain, dramatic shadows, cohesive color script, movie quality',
+  cyberpunk: 'neon lights, rain reflections, futuristic city, holographic displays, atmospheric depth',
+  inkwash: 'Chinese ink wash painting, misty mountains, poetic negative space, traditional brushwork',
+  anime: 'anime illustration, soft pastel colors, expressive characters, detailed scene composition',
+  realistic: 'photorealistic, natural lighting, high detail photography, cinematic depth',
+  abstract: 'abstract geometric shapes, vibrant colors, layered texture, modern art composition',
+}
+
+const arcTemplates = [
+  { title: '序章', mood: 'calm cinematic opening' },
+  { title: '铺垫', mood: 'gentle emotional build-up' },
+  { title: '推进', mood: 'steady narrative progression' },
+  { title: '转折', mood: 'subtle emotional turning point' },
+  { title: '高潮', mood: 'intense and powerful emotional peak' },
+  { title: '回响', mood: 'echoing chorus and recurring emotion' },
+  { title: '余韵', mood: 'reflective lingering aftertaste' },
+  { title: '尾声', mood: 'quiet closing resolution' },
+]
+
+const themeKeywords: Record<string, string[]> = {
+  farewell: ['别', '离', '散', '送', '归', '走', '远方'],
+  memory: ['回忆', '从前', '曾经', '昨日', '记得', '往事'],
+  night: ['夜', '月', '星', '灯', '梦', '黑', '晚', '黎明'],
+  journey: ['路', '风', '山', '海', '船', '远', '站', '旅行'],
+  city: ['城', '街', '楼', '窗', '人海', '霓虹', '巷'],
+  emotion: ['心', '泪', '爱', '想念', '孤独', '寂寞', '拥抱', '温柔'],
+  nature: ['雨', '雪', '云', '花', '叶', '江', '河', '雾', '海'],
+}
+
+const normalizeLyricText = (text: string) =>
+  text.trim().toLowerCase().replace(/[\s，。！？、；：“”‘’（）()《》【】…—,.!?;:·-]+/g, '')
+
+const lineLooksComplete = (text: string) => /[。！？!?；;…]$/.test(text.trim()) || text.trim().length >= 10
+
+const detectTheme = (text: string) => {
+  const found = Object.entries(themeKeywords).find(([, keywords]) =>
+    keywords.some((keyword) => text.includes(keyword))
+  )
+  return found?.[0] ?? 'neutral'
+}
+
+const medianGap = (lyrics: LyricLine[]) => {
+  const gaps = lyrics
+    .slice(1)
+    .map((line, index) => Math.max(0, line.time - lyrics[index].time))
+    .filter((gap) => gap > 0)
+    .sort((a, b) => a - b)
+
+  if (gaps.length === 0) {
+    return 4
+  }
+
+  const middle = Math.floor(gaps.length / 2)
+  return gaps.length % 2 === 1 ? gaps[middle] : (gaps[middle - 1] + gaps[middle]) / 2
+}
+
+const getPauseThresholds = (lyrics: LyricLine[]) => {
+  const baseGap = medianGap(lyrics)
+  return {
+    hardPause: Math.max(BASE_HARD_PAUSE, baseGap * 1.8),
+    softPause: Math.max(BASE_SOFT_PAUSE, baseGap * 1.25),
+  }
+}
+
+const shouldSplitSegment = (
+  currentSegment: LyricLine[],
+  nextLine: LyricLine,
+  seenCounts: Map<string, number>,
+  hardPause: number,
+  softPause: number
+) => {
+  if (currentSegment.length === 0) {
+    return false
+  }
+
+  const previousLine = currentSegment[currentSegment.length - 1]
+  const gap = Math.max(0, nextLine.time - previousLine.time)
+  const nextKey = normalizeLyricText(nextLine.text)
+  const repeatedLine = Boolean(nextKey) && (seenCounts.get(nextKey) ?? 0) > 0
+  const currentTheme = detectTheme(currentSegment.slice(-2).map((line) => line.text).join(' '))
+  const nextTheme = detectTheme(nextLine.text)
+  const themeShift =
+    currentSegment.length >= MIN_SEGMENT_LINES &&
+    currentTheme !== 'neutral' &&
+    nextTheme !== 'neutral' &&
+    currentTheme !== nextTheme
+
+  if (currentSegment.length >= MAX_SEGMENT_LINES) {
+    return true
+  }
+
+  if (gap >= hardPause && currentSegment.length >= 2) {
+    return true
+  }
+
+  if (repeatedLine && currentSegment.length >= 2) {
+    return true
+  }
+
+  if (
+    currentSegment.length >= IDEAL_SEGMENT_LINES &&
+    (gap >= softPause || lineLooksComplete(previousLine.text) || themeShift)
+  ) {
+    return true
+  }
+
+  return false
+}
+
+const mergeShortSegments = (segments: LyricLine[][]) => {
+  const merged: LyricLine[][] = []
+
+  segments.forEach((segment) => {
+    if (segment.length === 0) {
+      return
+    }
+
+    if (
+      merged.length > 0 &&
+      segment.length < MIN_SEGMENT_LINES &&
+      merged[merged.length - 1].length + segment.length <= MAX_SEGMENT_LINES + 1
+    ) {
+      merged[merged.length - 1] = [...merged[merged.length - 1], ...segment]
+      return
+    }
+
+    if (merged.length > 0 && merged[merged.length - 1].length < MIN_SEGMENT_LINES) {
+      merged[merged.length - 1] = [...merged[merged.length - 1], ...segment]
+      return
+    }
+
+    merged.push([...segment])
+  })
+
+  if (merged.length >= 2 && merged[merged.length - 1].length < MIN_SEGMENT_LINES) {
+    merged[merged.length - 2] = [...merged[merged.length - 2], ...merged[merged.length - 1]]
+    merged.pop()
+  }
+
+  return merged
+}
+
+const buildLyricSegments = (validLyrics: LyricLine[]) => {
+  if (validLyrics.length === 0) {
+    return [] as LyricLine[][]
+  }
+
+  const { hardPause, softPause } = getPauseThresholds(validLyrics)
+  const seenCounts = new Map<string, number>()
+  const segments: LyricLine[][] = []
+  let currentSegment: LyricLine[] = []
+
+  validLyrics.forEach((line) => {
+    if (shouldSplitSegment(currentSegment, line, seenCounts, hardPause, softPause)) {
+      segments.push(currentSegment)
+      currentSegment = []
+    }
+
+    currentSegment.push(line)
+
+    const lineKey = normalizeLyricText(line.text)
+    if (lineKey) {
+      seenCounts.set(lineKey, (seenCounts.get(lineKey) ?? 0) + 1)
+    }
+  })
+
+  if (currentSegment.length > 0) {
+    segments.push(currentSegment)
+  }
+
+  return mergeShortSegments(segments)
+}
+
+const getArcTemplate = (index: number, total: number) => {
+  if (total <= 1) {
+    return arcTemplates[0]
+  }
+
+  const arcIndex = Math.round((index * (arcTemplates.length - 1)) / Math.max(total - 1, 1))
+  return arcTemplates[Math.min(arcTemplates.length - 1, arcIndex)]
+}
+
+const buildGlobalSummary = (lyrics: LyricLine[]) => {
+  const snippets: string[] = []
+
+  lyrics.forEach((line) => {
+    const text = line.text.trim()
+    if (text && !snippets.includes(text) && snippets.length < 5) {
+      snippets.push(text)
+    }
+  })
+
+  return snippets.join('，').slice(0, 100)
+}
+
+const visualTextLength = (text: string) => normalizeLyricText(text).length
+
+const isShortVisualLine = (line: LyricLine) => visualTextLength(line.text) < MIN_VISUAL_TEXT_LENGTH
+
+const visualGroupTextLength = (group: LyricLine[]) =>
+  group.reduce((total, line) => total + visualTextLength(line.text), 0)
+
+const canMergeVisualGroup = (left: LyricLine[], right: LyricLine[]) =>
+  left.length + right.length <= MAX_VISUAL_GROUP_LINES &&
+  visualGroupTextLength(left) + visualGroupTextLength(right) <= MAX_VISUAL_GROUP_TEXT_LENGTH
+
+const buildVisualGroups = (validLyrics: LyricLine[]) => {
+  const groups: LyricLine[][] = []
+
+  validLyrics.forEach((line) => {
+    const lineGroup = [line]
+    const previousGroup = groups[groups.length - 1]
+
+    if (isShortVisualLine(line) && previousGroup && canMergeVisualGroup(previousGroup, lineGroup)) {
+      previousGroup.push(line)
+      return
+    }
+
+    groups.push(lineGroup)
+  })
+
+  const merged: LyricLine[][] = []
+  let index = 0
+
+  while (index < groups.length) {
+    const group = groups[index]
+    const isLonelyShortGroup = group.length === 1 && isShortVisualLine(group[0])
+
+    if (isLonelyShortGroup && groups[index + 1] && canMergeVisualGroup(group, groups[index + 1])) {
+      groups[index + 1] = [...group, ...groups[index + 1]]
+      index += 1
+      continue
+    }
+
+    if (isLonelyShortGroup && merged.length > 0 && canMergeVisualGroup(merged[merged.length - 1], group)) {
+      merged[merged.length - 1] = [...merged[merged.length - 1], ...group]
+    } else {
+      merged.push([...group])
+    }
+
+    index += 1
+  }
+
+  return merged
+}
+
+const buildSegmentStoryboard = (
+  lyrics: LyricLine[],
+  style: string,
+  duration: number
+): { scenes: Scene[]; analysis: StoryAnalysis } => {
+  const validLyrics = lyrics.filter((line) => !line.skip && line.text.trim())
+
+  if (validLyrics.length === 0) {
+    return {
+      scenes: [],
+      analysis: {
+        total_scenes: 0,
+        valid_lyrics: 0,
+        style,
+        summary: '没有有效歌词，请先导入歌词',
+      },
+    }
+  }
+
+  const styleKeyword = styleKeywords[style] || styleKeywords.cinematic
+  const segments = buildLyricSegments(validLyrics)
+  const globalSummary = buildGlobalSummary(validLyrics)
+  const sceneKeyMap = new Map<string, number>()
+  const effectiveDuration = duration || validLyrics[validLyrics.length - 1].time + 3
+
+  const scenes = segments.map((segment, index) => {
+    const arc = getArcTemplate(index, segments.length)
+    const combinedText = segment.map((line) => line.text).join('，')
+    const shortText = combinedText.slice(0, 90)
+    const lastLineTime = segment[segment.length - 1].time
+    const nextStart = segments[index + 1]?.[0]?.time ?? effectiveDuration
+    const endTime = Math.max(lastLineTime + 0.4, nextStart - 0.12)
+    const segmentKeys = segment
+      .map((line) => normalizeLyricText(line.text))
+      .filter(Boolean)
+    const reuseFrom = segmentKeys.find((key) => sceneKeyMap.has(key))
+    const variationPrompt = reuseFrom
+      ? 'reuse the established chorus visual motif with a fresh camera angle, tighter continuity'
+      : 'introduce a new but style-consistent composition'
+    const seed = Math.abs(stringHash(`${combinedText}-${style}-${index}`)) % 1000
+
+    segmentKeys.forEach((key) => {
+      if (!sceneKeyMap.has(key)) {
+        sceneKeyMap.set(key, index)
+      }
+    })
+
+    return {
+      scene_index: index,
+      title: `分镜${index + 1} · ${arc.title}`,
+      description: combinedText.slice(0, 72) + (combinedText.length > 72 ? '...' : ''),
+      prompt: `${arc.mood}, song visual theme: '${globalSummary}', lyrics segment: '${shortText}', ${styleKeyword}, ${variationPrompt}, high quality, 4k, wide angle`,
+      start_time: segment[0].time,
+      end_time: endTime,
+      lyric_ids: segment.map((line) => line.id),
+      image_url: `https://picsum.photos/seed/${seed}/1280/720`,
+    }
+  })
+
+  const averageLines = (validLyrics.length / Math.max(scenes.length, 1)).toFixed(1)
+
+  return {
+    scenes,
+    analysis: {
+      total_scenes: scenes.length,
+      valid_lyrics: validLyrics.length,
+      style,
+      summary: `已按段落切分 ${validLyrics.length} 行歌词，生成 ${scenes.length} 个分镜，平均每镜 ${averageLines} 行歌词`,
+    },
+  }
+}
+
+const buildLyricAlignedScenes = (
+  lyrics: LyricLine[],
+  style: string,
+  duration: number,
+  songName: string,
+  visualLock?: VisualLockSettings
+): { scenes: Scene[]; analysis: StoryAnalysis } => {
+  const validLyrics = lyrics
+    .filter((line) => !line.skip && line.text.trim())
+    .sort((a, b) => a.time - b.time)
+
+  if (validLyrics.length === 0) {
+    return {
+      scenes: [],
+      analysis: {
+        total_scenes: 0,
+        valid_lyrics: 0,
+        style,
+        summary: '没有有效歌词，请先导入歌词',
+      },
+    }
+  }
+
+  const styleKeyword = styleKeywords[style] || styleKeywords.cinematic
+  const visualGroups = buildVisualGroups(validLyrics)
+  const effectiveDuration = Math.max(
+    duration || 0,
+    validLyrics[validLyrics.length - 1].time + 1,
+    30
+  )
+  const globalSummary = buildGlobalSummary(validLyrics)
+
+  const scenes = visualGroups.map((group, index) => {
+    const combinedText = group.map((line) => line.text.trim()).filter(Boolean).join('，')
+    const previousGroup = visualGroups[index - 1]
+    const previousText = previousGroup?.[previousGroup.length - 1]?.text || ''
+    const nextText = visualGroups[index + 1]?.[0]?.text || ''
+    const startTime = index === 0 ? 0 : group[0].time
+    const nextTime = visualGroups[index + 1]?.[0]?.time ?? effectiveDuration
+    const endTime = Math.max(startTime + 0.4, nextTime)
+    const groupKey = group.map((line) => `${line.id}:${line.text}`).join('|')
+    const seed = Math.abs(stringHash(`lyric-scene-${groupKey}-${style}-${index}`)) % 1000
+    const context = [
+      songName ? `song: '${songName.slice(0, 60)}'` : '',
+      previousText ? `previous lyric: '${previousText.slice(0, 60)}'` : '',
+      `current lyric group: '${combinedText.slice(0, 140)}'`,
+      nextText ? `next lyric: '${nextText.slice(0, 60)}'` : '',
+    ].filter(Boolean).join(', ')
+
+    return {
+      scene_index: index,
+      title: `歌词画面 ${index + 1}`,
+      description: combinedText,
+      prompt: appendVisualLock(`music video still frame, overall lyric theme: '${globalSummary}', ${context}, ${styleKeyword}, visualize this lyric group literally and emotionally, keep characters, setting, lighting, and color palette consistent with adjacent lyrics, no text overlay, high quality, 4k, 16:9 wide shot`, visualLock),
+      start_time: startTime,
+      end_time: endTime,
+      lyric_ids: group.map((line) => line.id),
+      image_url: `https://picsum.photos/seed/${seed}/1280/720`,
+    }
+  })
+
+  return {
+    scenes,
+    analysis: {
+      total_scenes: scenes.length,
+      valid_lyrics: validLyrics.length,
+      style,
+      summary: `已使用本地智能分镜生成 ${scenes.length} 个镜头，覆盖 ${validLyrics.length} 行歌词`,
+    },
+  }
+}
+
+const getProviderLabel = (provider: string) => {
+  const labels: Record<string, string> = {
+    placeholder: '占位图',
+    pollinations: 'Pollinations 免费图片',
+    openai: 'OpenAI 图片',
+    custom: '自定义模型',
+    none: '不生成视频',
+    local_motion: '本地动态',
+    runway: 'Runway',
+    luma: 'Luma',
+    kling: 'Kling',
+  }
+  return labels[provider] || provider
+}
+
+const formatMinutesRange = (minSeconds: number, maxSeconds: number) => {
+  if (maxSeconds <= 0) {
+    return '即时'
+  }
+  const minMinutes = Math.max(1, Math.ceil(minSeconds / 60))
+  const maxMinutes = Math.max(minMinutes, Math.ceil(maxSeconds / 60))
+  return minMinutes === maxMinutes ? `约 ${minMinutes} 分钟` : `约 ${minMinutes}-${maxMinutes} 分钟`
+}
+
+const getGenerationEstimate = (
+  lyrics: LyricLine[],
+  scenes: Scene[],
+  style: string,
+  duration: number | undefined,
+  songName: string | undefined,
+  imageProvider: string,
+  videoProvider: string
+) => {
+  const validLyrics = lyrics.filter((line) => !line.skip && line.text.trim())
+  const estimatedSceneCount =
+    scenes.length > 0
+      ? scenes.length
+      : buildLyricAlignedScenes(lyrics, style, duration || 240, songName || '').scenes.length
+  const imageJobs = estimatedSceneCount
+  const videoJobs = videoProvider === 'none' ? 0 : estimatedSceneCount
+  const imagePaid = !['placeholder', 'pollinations'].includes(imageProvider)
+  const videoPaid = !['none', 'local_motion'].includes(videoProvider)
+  const imageSeconds =
+    imageProvider === 'placeholder'
+      ? [0, 0]
+      : imageProvider === 'pollinations'
+        ? [imageJobs * 12, imageJobs * 45]
+        : [imageJobs * 20, imageJobs * 90]
+  const videoSeconds =
+    videoProvider === 'none'
+      ? [0, 0]
+      : videoProvider === 'local_motion'
+        ? [videoJobs * 4, videoJobs * 12]
+        : [videoJobs * 60, videoJobs * 300]
+  const minSeconds = imageSeconds[0] + videoSeconds[0]
+  const maxSeconds = imageSeconds[1] + videoSeconds[1]
+
+  return {
+    validLyrics: validLyrics.length,
+    estimatedSceneCount,
+    imageJobs,
+    videoJobs,
+    imageProviderLabel: getProviderLabel(imageProvider),
+    videoProviderLabel: getProviderLabel(videoProvider),
+    timeText: formatMinutesRange(minSeconds, maxSeconds),
+    costText:
+      imagePaid || videoPaid
+        ? `可能产生平台费用：${imagePaid ? `${imageJobs} 张图片` : ''}${imagePaid && videoPaid ? ' + ' : ''}${videoPaid ? `${videoJobs} 段视频` : ''}`
+        : '免费 / 本地处理',
+  }
+}
+
+
+const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex }) => {
+  const {
+    project,
+    imageSettings,
+    videoSettings,
+    isGenerating,
+    setProject,
+    setGenerating,
+    setScenes,
+    setLyrics,
+    addGenerationLog,
+    clearGenerationLogs,
+    addProjectAsset,
+    clearProjectAssets,
+  } = useAppStore()
+  const accent = styleColors[project.style] || '#4fc3f7'
+  const generationEstimate = getGenerationEstimate(
+    project.lyrics,
+    project.scenes,
+    project.style,
+    project.duration,
+    project.musicName,
+    imageSettings.provider,
+    videoSettings.provider
+  )
+  const [editingSceneIndex, setEditingSceneIndex] = useState<number | null>(null)
+  const [splitAfterLyricId, setSplitAfterLyricId] = useState<string | null>(null)
+  const [isLogDrawerOpen, setLogDrawerOpen] = useState(false)
+  const [isAssetDrawerOpen, setAssetDrawerOpen] = useState(false)
+  const [isVisualLockDrawerOpen, setVisualLockDrawerOpen] = useState(false)
+  const [isImageQueueRunning, setImageQueueRunning] = useState(false)
+  const [isVideoQueueRunning, setVideoQueueRunning] = useState(false)
+  const imageQueueCancelRef = useRef(false)
+  const videoQueueCancelRef = useRef(false)
+  const imageQueueAbortRef = useRef<AbortController | null>(null)
+  const videoQueueAbortRef = useRef<AbortController | null>(null)
+  const [editForm] = Form.useForm<Partial<Scene>>()
+  const [visualLockForm] = Form.useForm<VisualLockSettings>()
+  const editingScene =
+    editingSceneIndex === null
+      ? null
+      : project.scenes.find((scene) => scene.scene_index === editingSceneIndex) ?? null
+  const projectAssets = project.assets ?? []
+  const imageAssets = projectAssets.filter((asset) => asset.type === 'image')
+  const videoAssets = projectAssets.filter((asset) => asset.type === 'video')
+  const promptAssets = projectAssets.filter((asset) => asset.prompt || asset.videoPrompt)
+
+  const recordSceneAsset = (
+    scene: Scene,
+    type: ProjectAsset['type'],
+    options: {
+      url?: string
+      provider?: string
+      model?: string
+      source?: ProjectAsset['source']
+      title?: string
+    } = {}
+  ) => {
+    addProjectAsset({
+      type,
+      title: options.title || `${type === 'video' ? '视频片段' : '关键帧'} ${scene.scene_index + 1}`,
+      url: options.url,
+      prompt: scene.prompt,
+      videoPrompt: scene.video_prompt,
+      provider: options.provider,
+      model: options.model,
+      sceneIndex: scene.scene_index,
+      sceneTitle: scene.title,
+      source: options.source,
+    })
+  }
+
+  const handleFocusAssetScene = (asset: ProjectAsset) => {
+    if (typeof asset.sceneIndex !== 'number') {
+      return
+    }
+    const scene = project.scenes.find((item) => item.scene_index === asset.sceneIndex)
+    if (!scene) {
+      message.warning('对应镜头不存在')
+      return
+    }
+    onSceneSelect(scene)
+    setAssetDrawerOpen(false)
+  }
+
+  useEffect(() => {
+    if (!editingScene) {
+      editForm.resetFields()
+      setSplitAfterLyricId(null)
+      return
+    }
+
+    editForm.setFieldsValue(editingScene)
+    setSplitAfterLyricId(editingScene.lyric_ids.length > 1 ? editingScene.lyric_ids[0] : null)
+  }, [editForm, editingScene])
+
+  useEffect(() => {
+    if (isVisualLockDrawerOpen) {
+      visualLockForm.setFieldsValue(project.visualLock ?? { enabled: false })
+    }
+  }, [isVisualLockDrawerOpen, project.visualLock, visualLockForm])
+
+  const handleSaveVisualLock = async () => {
+    const values = await visualLockForm.validateFields()
+    setProject({
+      visualLock: {
+        enabled: Boolean(values.enabled),
+        mainSubject: values.mainSubject?.trim(),
+        wardrobe: values.wardrobe?.trim(),
+        setting: values.setting?.trim(),
+        palette: values.palette?.trim(),
+        symbols: values.symbols?.trim(),
+        negativePrompt: values.negativePrompt?.trim(),
+      },
+    })
+    setVisualLockDrawerOpen(false)
+    message.success('视觉设定已保存')
+  }
+
+  const applyStoryboardResult = (scenes: Scene[], analysis: StoryAnalysis) => {
+    const sceneMap: Record<string, number> = {}
+
+    scenes.forEach((scene) => {
+      scene.lyric_ids.forEach((id) => {
+        sceneMap[id] = scene.scene_index
+      })
+    })
+
+    const updatedLyrics = project.lyrics.map((line) => ({
+      ...line,
+      sceneIndex: sceneMap[line.id] ?? undefined,
+    }))
+
+    setLyrics(updatedLyrics)
+    setScenes(scenes, analysis)
+    scenes.forEach((scene) => {
+      if (scene.image_url) {
+        recordSceneAsset(scene, 'image', {
+          url: scene.image_url,
+          provider: imageSettings.provider,
+          model: imageSettings.model,
+          source: 'storyboard',
+          title: `Storyboard keyframe ${scene.scene_index + 1}`,
+        })
+      }
+    })
+  }
+
+  const formatTime = (s: number) => {
+
+    const m = Math.floor(s / 60)
+    const sec = Math.floor(s % 60)
+    return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+  }
+
+  const handleOpenEdit = (scene: Scene, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setEditingSceneIndex(scene.scene_index)
+  }
+
+  const handleSaveSceneEdit = async () => {
+    if (!editingScene) {
+      return
+    }
+
+    const values = await editForm.validateFields()
+    const updatedScenes = project.scenes.map((scene) =>
+      scene.scene_index === editingScene.scene_index
+        ? {
+            ...scene,
+            ...values,
+            image_status: 'idle' as GenerationStatus,
+            video_status: 'idle' as GenerationStatus,
+            generation_error: undefined,
+            video_url: undefined,
+            video_error: undefined,
+          }
+        : scene
+    )
+
+    setScenes(updatedScenes, project.analysis)
+    setEditingSceneIndex(null)
+    message.success('镜头设置已保存')
+  }
+
+  const handleMergeScene = (scene: Scene, direction: 'previous' | 'next', e?: React.MouseEvent) => {
+    e?.stopPropagation()
+
+    const orderedScenes = reindexScenes([...project.scenes])
+    const currentIndex = orderedScenes.findIndex((item) => item.scene_index === scene.scene_index)
+    const targetIndex = direction === 'previous' ? currentIndex - 1 : currentIndex + 1
+    const targetScene = orderedScenes[targetIndex]
+    const currentScene = orderedScenes[currentIndex]
+
+    if (!targetScene || !currentScene) {
+      message.warning(direction === 'previous' ? '前面没有可合并的镜头' : '后面没有可合并的镜头')
+      return
+    }
+
+    const firstScene = targetScene.start_time <= currentScene.start_time ? targetScene : currentScene
+    const secondScene = firstScene === targetScene ? currentScene : targetScene
+    const mergedScene: Scene = {
+      ...firstScene,
+      title: `${firstScene.title} + ${secondScene.title}`,
+      description: [firstScene.description, secondScene.description].filter(Boolean).join('，'),
+      summary: [firstScene.summary, secondScene.summary].filter(Boolean).join('，'),
+      start_time: Math.min(firstScene.start_time, secondScene.start_time),
+      end_time: Math.max(firstScene.end_time, secondScene.end_time),
+      lyric_ids: combineUnique(firstScene.lyric_ids, secondScene.lyric_ids),
+      video_prompt: [firstScene.video_prompt, secondScene.video_prompt].filter(Boolean).join(' '),
+      image_status: 'idle' as GenerationStatus,
+      video_status: 'idle' as GenerationStatus,
+      generation_error: undefined,
+      video_url: undefined,
+      video_error: undefined,
+    }
+
+    const nextScenes = orderedScenes.filter(
+      (item) => item.scene_index !== targetScene.scene_index && item.scene_index !== currentScene.scene_index
+    )
+    nextScenes.push(mergedScene)
+
+    const reindexed = reindexScenes(nextScenes)
+    const nextEditingScene = reindexed.find(
+      (item) => item.start_time === mergedScene.start_time && item.end_time === mergedScene.end_time
+    )
+    setScenes(reindexed, project.analysis)
+    setEditingSceneIndex(nextEditingScene?.scene_index ?? null)
+    message.success('镜头已合并')
+  }
+
+  const handleSplitScene = () => {
+    if (!editingScene || !splitAfterLyricId) {
+      message.warning('请选择拆分位置')
+      return
+    }
+
+    const splitIndex = editingScene.lyric_ids.indexOf(splitAfterLyricId)
+    if (splitIndex < 0 || splitIndex >= editingScene.lyric_ids.length - 1) {
+      message.warning('请选择镜头中间的歌词作为拆分位置')
+      return
+    }
+
+    const firstLyricIds = editingScene.lyric_ids.slice(0, splitIndex + 1)
+    const secondLyricIds = editingScene.lyric_ids.slice(splitIndex + 1)
+    const firstEndLyric = project.lyrics.find((line) => line.id === splitAfterLyricId)
+    const secondStartLyric = project.lyrics.find((line) => line.id === secondLyricIds[0])
+    const splitTime = secondStartLyric?.time ?? firstEndLyric?.time ?? (editingScene.start_time + editingScene.end_time) / 2
+    const firstText = project.lyrics
+      .filter((line) => firstLyricIds.includes(line.id))
+      .map((line) => line.text)
+      .join('，')
+    const secondText = project.lyrics
+      .filter((line) => secondLyricIds.includes(line.id))
+      .map((line) => line.text)
+      .join('，')
+
+    const firstScene: Scene = {
+      ...editingScene,
+      title: `${editingScene.title} A`,
+      description: firstText || editingScene.description,
+      summary: firstText || editingScene.summary,
+      end_time: Math.max(editingScene.start_time + 0.4, splitTime),
+      lyric_ids: firstLyricIds,
+      image_status: 'idle' as GenerationStatus,
+      video_status: 'idle' as GenerationStatus,
+      generation_error: undefined,
+      video_url: undefined,
+      video_error: undefined,
+    }
+
+    const secondScene: Scene = {
+      ...editingScene,
+      title: `${editingScene.title} B`,
+      description: secondText || editingScene.description,
+      summary: secondText || editingScene.summary,
+      start_time: Math.max(editingScene.start_time, splitTime),
+      lyric_ids: secondLyricIds,
+      image_status: 'idle' as GenerationStatus,
+      video_status: 'idle' as GenerationStatus,
+      generation_error: undefined,
+      video_url: undefined,
+      video_error: undefined,
+    }
+
+    const nextScenes = project.scenes.filter((scene) => scene.scene_index !== editingScene.scene_index)
+    nextScenes.push(firstScene, secondScene)
+    const reindexed = reindexScenes(nextScenes)
+    const nextEditingScene = reindexed.find(
+      (item) => item.start_time === firstScene.start_time && item.end_time === firstScene.end_time
+    )
+    setScenes(reindexed, project.analysis)
+    setEditingSceneIndex(nextEditingScene?.scene_index ?? null)
+    message.success('镜头已拆分')
+  }
+
+  // 生成智能分镜
+  const handleGenerate = async () => {
+    const validLyrics = project.lyrics.filter((line) => !line.skip)
+    if (validLyrics.length === 0) {
+      message.warning('请先导入歌词')
+      return
+    }
+
+    const localStoryboard = buildLyricAlignedScenes(
+      project.lyrics,
+      project.style,
+      project.duration || 240,
+      project.musicName || '',
+      project.visualLock
+    )
+    const startedAt = Date.now()
+
+    setGenerating(true)
+    message.loading({ content: 'AI 导演正在分析歌词并生成智能分镜...', key: 'storyboard' })
+
+    try {
+      const res = await axios.post('http://localhost:8000/api/generate/smart-storyboard', {
+        lyrics: project.lyrics,
+        style: project.style,
+        duration: project.duration || 240,
+        song_name: project.musicName || '',
+        image_provider: imageSettings,
+        visual_lock: toBackendVisualLock(project.visualLock),
+      })
+
+      const { scenes, analysis } = res.data as {
+        scenes?: Scene[]
+        analysis?: StoryAnalysis
+      }
+
+      if (!Array.isArray(scenes) || !analysis) {
+        throw new Error('invalid storyboard response')
+      }
+
+      if (scenes.length === 0) {
+        applyStoryboardResult(localStoryboard.scenes, localStoryboard.analysis)
+        addGenerationLog({
+          type: 'storyboard',
+          status: 'success',
+          title: '本地智能分镜',
+          provider: 'local',
+          model: project.style,
+          message: `后端未返回分镜，已使用本地分镜生成 ${localStoryboard.scenes.length} 个镜头`,
+          durationMs: Date.now() - startedAt,
+        })
+        message.success({
+          content: `已切换为本地智能分镜，共 ${localStoryboard.scenes.length} 个镜头`,
+          key: 'storyboard',
+        })
+        return
+      }
+
+      applyStoryboardResult(scenes, analysis)
+      addGenerationLog({
+        type: 'storyboard',
+        status: 'success',
+        title: 'AI 智能分镜',
+        provider: imageSettings.provider,
+        model: imageSettings.model,
+        message: `生成 ${scenes.length} 个镜头，覆盖 ${analysis.valid_lyrics} 行歌词`,
+        durationMs: Date.now() - startedAt,
+      })
+      message.success({
+        content: `智能分镜生成完成！共 ${scenes.length} 个镜头`,
+        key: 'storyboard',
+      })
+    } catch (error) {
+      applyStoryboardResult(localStoryboard.scenes, localStoryboard.analysis)
+      addGenerationLog({
+        type: 'storyboard',
+        status: 'error',
+        title: 'AI 智能分镜失败',
+        provider: imageSettings.provider,
+        model: imageSettings.model,
+        message: `已切换为本地分镜，生成 ${localStoryboard.scenes.length} 个镜头`,
+        error: getErrorMessage(error),
+        durationMs: Date.now() - startedAt,
+      })
+
+      const isMissingRoute = axios.isAxiosError(error) && error.response?.status === 404
+      message.warning({
+        content: isMissingRoute
+          ? '当前后端未提供智能分镜接口，已切换为本地分镜'
+          : '后端生成失败，已切换为本地智能分镜',
+        key: 'storyboard',
+      })
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+
+
+  // 重新生成单个场景图片
+  const handleCancelImageQueue = () => {
+    imageQueueCancelRef.current = true
+    imageQueueAbortRef.current?.abort()
+    message.info('正在取消关键帧队列...')
+  }
+
+  const handleCancelVideoQueue = () => {
+    videoQueueCancelRef.current = true
+    videoQueueAbortRef.current?.abort()
+    message.info('正在取消视频队列...')
+  }
+
+  const handleGenerateKeyframeQueue = async (mode: 'all' | 'failed' = 'all') => {
+    if (project.scenes.length === 0) {
+      message.warning('请先生成智能分镜')
+      return
+    }
+
+    setImageQueueRunning(true)
+    let failedCount = 0
+    let nextScenes: Scene[] = reindexScenes([...project.scenes]).map((scene) => ({
+      ...scene,
+      image_status: 'queued' as GenerationStatus,
+      generation_error: undefined,
+    }))
+
+    setScenes(nextScenes, project.analysis)
+    message.loading({ content: `关键帧队列已开始，共 ${nextScenes.length} 个镜头`, key: 'image-queue' })
+
+    for (const scene of nextScenes) {
+      nextScenes = nextScenes.map((item) =>
+        item.scene_index === scene.scene_index
+          ? { ...item, image_status: 'generating' as GenerationStatus, generation_error: undefined }
+          : item
+      )
+      setScenes(nextScenes, project.analysis)
+
+      try {
+        const res = await axios.post('http://localhost:8000/api/generate/image', {
+          prompt: scene.prompt,
+          scene_index: scene.scene_index,
+          image_provider: imageSettings,
+          visual_lock: toBackendVisualLock(project.visualLock),
+        })
+
+        nextScenes = nextScenes.map((item) =>
+          item.scene_index === scene.scene_index
+            ? {
+                ...item,
+                image_url: res.data.image_url,
+                image_status: 'done' as GenerationStatus,
+                generation_error: undefined,
+                video_url: undefined,
+                video_status: 'idle' as GenerationStatus,
+                video_error: undefined,
+              }
+            : item
+        )
+      } catch (error) {
+        failedCount += 1
+        nextScenes = nextScenes.map((item) =>
+          item.scene_index === scene.scene_index
+            ? {
+                ...item,
+                image_status: 'error' as GenerationStatus,
+                generation_error: getErrorMessage(error),
+              }
+            : item
+        )
+      }
+
+      setScenes(nextScenes, project.analysis)
+    }
+
+    setImageQueueRunning(false)
+    if (failedCount > 0) {
+      message.warning({ content: `关键帧队列完成，${failedCount} 个镜头生成失败，可单独重试`, key: 'image-queue' })
+    } else {
+      message.success({ content: '关键帧队列生成完成', key: 'image-queue' })
+    }
+  }
+
+  const runKeyframeQueue = async (mode: 'all' | 'failed' = 'all') => {
+    if (project.scenes.length === 0) {
+      message.warning('请先生成智能分镜')
+      return
+    }
+
+    const targetIndexes = new Set(
+      project.scenes
+        .filter((scene) => mode === 'all' || scene.image_status === 'error')
+        .map((scene) => scene.scene_index)
+    )
+
+    if (targetIndexes.size === 0) {
+      message.info(mode === 'failed' ? '没有失败的关键帧需要重试' : '没有可生成的关键帧')
+      return
+    }
+
+    imageQueueCancelRef.current = false
+    setImageQueueRunning(true)
+    let failedCount = 0
+    let nextScenes: Scene[] = reindexScenes([...project.scenes]).map((scene) =>
+      targetIndexes.has(scene.scene_index)
+        ? { ...scene, image_status: 'queued' as GenerationStatus, generation_error: undefined }
+        : scene
+    )
+
+    setScenes(nextScenes, project.analysis)
+    message.loading({ content: `关键帧队列已开始，共 ${targetIndexes.size} 个镜头`, key: 'image-queue' })
+
+    for (const scene of nextScenes.filter((item) => targetIndexes.has(item.scene_index))) {
+      if (imageQueueCancelRef.current) {
+        break
+      }
+      const sceneStartedAt = Date.now()
+
+      nextScenes = nextScenes.map((item) =>
+        item.scene_index === scene.scene_index
+          ? { ...item, image_status: 'generating' as GenerationStatus, generation_error: undefined }
+          : item
+      )
+      setScenes(nextScenes, project.analysis)
+
+      try {
+        const controller = new AbortController()
+        imageQueueAbortRef.current = controller
+        const res = await axios.post('http://localhost:8000/api/generate/image', {
+          prompt: scene.prompt,
+          scene_index: scene.scene_index,
+          image_provider: imageSettings,
+          visual_lock: toBackendVisualLock(project.visualLock),
+        }, { signal: controller.signal })
+        imageQueueAbortRef.current = null
+        addGenerationLog({
+          type: 'image',
+          status: 'success',
+          title: `关键帧 ${scene.scene_index + 1}`,
+          provider: imageSettings.provider,
+          model: imageSettings.model,
+          sceneIndex: scene.scene_index,
+          sceneTitle: scene.title,
+          message: res.data.image_url ? '图片已生成并写入镜头' : '图片接口返回为空',
+          durationMs: Date.now() - sceneStartedAt,
+        })
+        if (res.data.image_url) {
+          recordSceneAsset(scene, 'image', {
+            url: res.data.image_url,
+            provider: imageSettings.provider,
+            model: imageSettings.model,
+            source: 'queue',
+            title: `Generated keyframe ${scene.scene_index + 1}`,
+          })
+        }
+
+        nextScenes = nextScenes.map((item) =>
+          item.scene_index === scene.scene_index
+            ? {
+                ...item,
+                image_url: res.data.image_url,
+                image_status: 'done' as GenerationStatus,
+                generation_error: undefined,
+                video_url: undefined,
+                video_status: 'idle' as GenerationStatus,
+                video_error: undefined,
+              }
+            : item
+        )
+      } catch (error) {
+        imageQueueAbortRef.current = null
+
+        if (imageQueueCancelRef.current) {
+          addGenerationLog({
+            type: 'image',
+            status: 'canceled',
+            title: `关键帧 ${scene.scene_index + 1}`,
+            provider: imageSettings.provider,
+            model: imageSettings.model,
+            sceneIndex: scene.scene_index,
+            sceneTitle: scene.title,
+            message: '关键帧生成已取消',
+            durationMs: Date.now() - sceneStartedAt,
+          })
+          nextScenes = nextScenes.map((item) =>
+            item.scene_index === scene.scene_index || item.image_status === 'queued'
+              ? { ...item, image_status: 'idle' as GenerationStatus, generation_error: undefined }
+              : item
+          )
+          setScenes(nextScenes, project.analysis)
+          break
+        }
+
+        failedCount += 1
+        const errorMessage = getErrorMessage(error)
+        addGenerationLog({
+          type: 'image',
+          status: 'error',
+          title: `关键帧 ${scene.scene_index + 1}`,
+          provider: imageSettings.provider,
+          model: imageSettings.model,
+          sceneIndex: scene.scene_index,
+          sceneTitle: scene.title,
+          error: errorMessage,
+          durationMs: Date.now() - sceneStartedAt,
+        })
+        nextScenes = nextScenes.map((item) =>
+          item.scene_index === scene.scene_index
+            ? { ...item, image_status: 'error' as GenerationStatus, generation_error: errorMessage }
+            : item
+        )
+      }
+
+      setScenes(nextScenes, project.analysis)
+    }
+
+    const wasCanceled = imageQueueCancelRef.current
+    imageQueueCancelRef.current = false
+    imageQueueAbortRef.current = null
+
+    if (wasCanceled) {
+      nextScenes = nextScenes.map((item) =>
+        item.image_status === 'queued'
+          ? { ...item, image_status: 'idle' as GenerationStatus, generation_error: undefined }
+          : item
+      )
+      setScenes(nextScenes, project.analysis)
+    }
+
+    setImageQueueRunning(false)
+    if (wasCanceled) {
+      message.info({ content: '关键帧队列已取消', key: 'image-queue' })
+    } else if (failedCount > 0) {
+      message.warning({ content: `关键帧队列完成，${failedCount} 个镜头失败，可重试失败项`, key: 'image-queue' })
+    } else {
+      message.success({ content: '关键帧队列生成完成', key: 'image-queue' })
+    }
+  }
+
+  const handleGenerateVideoQueue = async () => {
+    if (project.scenes.length === 0) {
+      message.warning('请先生成智能分镜')
+      return
+    }
+
+    if (videoSettings.provider === 'none') {
+      message.warning('当前已关闭视频模型')
+      return
+    }
+
+    setVideoQueueRunning(true)
+    let failedCount = 0
+    let nextScenes: Scene[] = reindexScenes([...project.scenes]).map((scene) => ({
+      ...scene,
+      video_status: 'queued' as GenerationStatus,
+      video_error: undefined,
+    }))
+
+    setScenes(nextScenes, project.analysis)
+    message.loading({ content: `视频队列已开始，共 ${nextScenes.length} 个镜头`, key: 'video-queue' })
+
+    for (const scene of nextScenes) {
+      nextScenes = nextScenes.map((item) =>
+        item.scene_index === scene.scene_index
+          ? { ...item, video_status: 'generating' as GenerationStatus, video_error: undefined }
+          : item
+      )
+      setScenes(nextScenes, project.analysis)
+
+      if (!scene.image_url) {
+        failedCount += 1
+        nextScenes = nextScenes.map((item) =>
+          item.scene_index === scene.scene_index
+            ? {
+                ...item,
+                video_status: 'error' as GenerationStatus,
+                video_error: '缺少关键帧图片，请先生成关键帧',
+              }
+            : item
+        )
+        setScenes(nextScenes, project.analysis)
+        continue
+      }
+
+      try {
+        const res = await axios.post('http://localhost:8000/api/generate/video', {
+          prompt: scene.video_prompt || scene.prompt,
+          image_url: scene.image_url,
+          scene_index: scene.scene_index,
+          duration: Math.max(0.5, scene.end_time - scene.start_time),
+          camera_motion: scene.camera_motion || '',
+          video_provider: {
+            provider: videoSettings.provider,
+            model: videoSettings.model,
+            api_key: videoSettings.apiKey,
+            base_url: videoSettings.baseUrl,
+            motion_strength: videoSettings.motionStrength,
+            clip_seconds: videoSettings.clipSeconds,
+          },
+        })
+
+        nextScenes = nextScenes.map((item) =>
+          item.scene_index === scene.scene_index
+            ? {
+                ...item,
+                video_url: res.data.video_url,
+                video_status: 'done' as GenerationStatus,
+                video_error: undefined,
+              }
+            : item
+        )
+      } catch (error) {
+        failedCount += 1
+        nextScenes = nextScenes.map((item) =>
+          item.scene_index === scene.scene_index
+            ? {
+                ...item,
+                video_status: 'error' as GenerationStatus,
+                video_error: getErrorMessage(error),
+              }
+            : item
+        )
+      }
+
+      setScenes(nextScenes, project.analysis)
+    }
+
+    setVideoQueueRunning(false)
+    if (failedCount > 0) {
+      message.warning({ content: `视频队列完成，${failedCount} 个镜头失败`, key: 'video-queue' })
+    } else {
+      message.success({ content: '视频队列已完成', key: 'video-queue' })
+    }
+  }
+
+  const runVideoQueue = async (mode: 'all' | 'failed' = 'all') => {
+    if (project.scenes.length === 0) {
+      message.warning('请先生成智能分镜')
+      return
+    }
+
+    if (videoSettings.provider === 'none') {
+      message.warning('当前已关闭视频模型')
+      return
+    }
+
+    const targetIndexes = new Set(
+      project.scenes
+        .filter((scene) => mode === 'all' || scene.video_status === 'error')
+        .map((scene) => scene.scene_index)
+    )
+
+    if (targetIndexes.size === 0) {
+      message.info(mode === 'failed' ? '没有失败的视频片段需要重试' : '没有可生成的视频片段')
+      return
+    }
+
+    videoQueueCancelRef.current = false
+    setVideoQueueRunning(true)
+    let failedCount = 0
+    let nextScenes: Scene[] = reindexScenes([...project.scenes]).map((scene) =>
+      targetIndexes.has(scene.scene_index)
+        ? { ...scene, video_status: 'queued' as GenerationStatus, video_error: undefined }
+        : scene
+    )
+
+    setScenes(nextScenes, project.analysis)
+    message.loading({ content: `视频队列已开始，共 ${targetIndexes.size} 个镜头`, key: 'video-queue' })
+
+    for (const scene of nextScenes.filter((item) => targetIndexes.has(item.scene_index))) {
+      if (videoQueueCancelRef.current) {
+        break
+      }
+      const sceneStartedAt = Date.now()
+
+      nextScenes = nextScenes.map((item) =>
+        item.scene_index === scene.scene_index
+          ? { ...item, video_status: 'generating' as GenerationStatus, video_error: undefined }
+          : item
+      )
+      setScenes(nextScenes, project.analysis)
+
+      if (!scene.image_url) {
+        failedCount += 1
+        addGenerationLog({
+          type: 'video',
+          status: 'error',
+          title: `视频片段 ${scene.scene_index + 1}`,
+          provider: videoSettings.provider,
+          model: videoSettings.model,
+          sceneIndex: scene.scene_index,
+          sceneTitle: scene.title,
+          error: '缺少关键帧图片，请先生成关键帧',
+          durationMs: Date.now() - sceneStartedAt,
+        })
+        nextScenes = nextScenes.map((item) =>
+          item.scene_index === scene.scene_index
+            ? { ...item, video_status: 'error' as GenerationStatus, video_error: '缺少关键帧图片，请先生成关键帧' }
+            : item
+        )
+        setScenes(nextScenes, project.analysis)
+        continue
+      }
+
+      try {
+        const controller = new AbortController()
+        videoQueueAbortRef.current = controller
+        const res = await axios.post('http://localhost:8000/api/generate/video', {
+          prompt: scene.video_prompt || scene.prompt,
+          image_url: scene.image_url,
+          scene_index: scene.scene_index,
+          duration: Math.max(0.5, scene.end_time - scene.start_time),
+          camera_motion: scene.camera_motion || '',
+          video_provider: {
+            provider: videoSettings.provider,
+            model: videoSettings.model,
+            api_key: videoSettings.apiKey,
+            base_url: videoSettings.baseUrl,
+            motion_strength: videoSettings.motionStrength,
+            clip_seconds: videoSettings.clipSeconds,
+          },
+        }, { signal: controller.signal })
+        videoQueueAbortRef.current = null
+        addGenerationLog({
+          type: 'video',
+          status: 'success',
+          title: `视频片段 ${scene.scene_index + 1}`,
+          provider: videoSettings.provider,
+          model: videoSettings.model,
+          sceneIndex: scene.scene_index,
+          sceneTitle: scene.title,
+          message: res.data.video_url ? '视频片段已生成' : '视频接口返回为空',
+          durationMs: Date.now() - sceneStartedAt,
+        })
+        if (res.data.video_url) {
+          recordSceneAsset(scene, 'video', {
+            url: res.data.video_url,
+            provider: videoSettings.provider,
+            model: videoSettings.model,
+            source: 'queue',
+            title: `Generated video ${scene.scene_index + 1}`,
+          })
+        }
+
+        nextScenes = nextScenes.map((item) =>
+          item.scene_index === scene.scene_index
+            ? {
+                ...item,
+                video_url: res.data.video_url,
+                video_status: 'done' as GenerationStatus,
+                video_error: undefined,
+              }
+            : item
+        )
+      } catch (error) {
+        videoQueueAbortRef.current = null
+
+        if (videoQueueCancelRef.current) {
+          addGenerationLog({
+            type: 'video',
+            status: 'canceled',
+            title: `视频片段 ${scene.scene_index + 1}`,
+            provider: videoSettings.provider,
+            model: videoSettings.model,
+            sceneIndex: scene.scene_index,
+            sceneTitle: scene.title,
+            message: '视频片段生成已取消',
+            durationMs: Date.now() - sceneStartedAt,
+          })
+          nextScenes = nextScenes.map((item) =>
+            item.scene_index === scene.scene_index || item.video_status === 'queued'
+              ? { ...item, video_status: 'idle' as GenerationStatus, video_error: undefined }
+              : item
+          )
+          setScenes(nextScenes, project.analysis)
+          break
+        }
+
+        failedCount += 1
+        const errorMessage = getErrorMessage(error)
+        addGenerationLog({
+          type: 'video',
+          status: 'error',
+          title: `视频片段 ${scene.scene_index + 1}`,
+          provider: videoSettings.provider,
+          model: videoSettings.model,
+          sceneIndex: scene.scene_index,
+          sceneTitle: scene.title,
+          error: errorMessage,
+          durationMs: Date.now() - sceneStartedAt,
+        })
+        nextScenes = nextScenes.map((item) =>
+          item.scene_index === scene.scene_index
+            ? { ...item, video_status: 'error' as GenerationStatus, video_error: errorMessage }
+            : item
+        )
+      }
+
+      setScenes(nextScenes, project.analysis)
+    }
+
+    const wasCanceled = videoQueueCancelRef.current
+    videoQueueCancelRef.current = false
+    videoQueueAbortRef.current = null
+
+    if (wasCanceled) {
+      nextScenes = nextScenes.map((item) =>
+        item.video_status === 'queued'
+          ? { ...item, video_status: 'idle' as GenerationStatus, video_error: undefined }
+          : item
+      )
+      setScenes(nextScenes, project.analysis)
+    }
+
+    setVideoQueueRunning(false)
+    if (wasCanceled) {
+      message.info({ content: '视频队列已取消', key: 'video-queue' })
+    } else if (failedCount > 0) {
+      message.warning({ content: `视频队列完成，${failedCount} 个镜头失败，可重试失败项`, key: 'video-queue' })
+    } else {
+      message.success({ content: '视频队列已完成', key: 'video-queue' })
+    }
+  }
+
+  const regenerateScene = async (scene: Scene, e: React.MouseEvent) => {
+    e.stopPropagation()
+    const sceneStartedAt = Date.now()
+    const markScene = (patch: Partial<Scene>) => {
+      const updated = project.scenes.map((s) =>
+        s.scene_index === scene.scene_index
+          ? { ...s, ...patch }
+          : s
+      )
+      setScenes(updated, project.analysis)
+    }
+
+    markScene({ image_status: 'generating', generation_error: undefined })
+
+    try {
+      const res = await axios.post('http://localhost:8000/api/generate/image', {
+          prompt: scene.prompt,
+          scene_index: scene.scene_index,
+          image_provider: imageSettings,
+          visual_lock: toBackendVisualLock(project.visualLock),
+        })
+      addGenerationLog({
+        type: 'image',
+        status: 'success',
+        title: `重新生成关键帧 ${scene.scene_index + 1}`,
+        provider: imageSettings.provider,
+        model: imageSettings.model,
+        sceneIndex: scene.scene_index,
+        sceneTitle: scene.title,
+        message: res.data.image_url ? '场景图片已更新' : '图片接口返回为空',
+        durationMs: Date.now() - sceneStartedAt,
+      })
+      if (res.data.image_url) {
+        recordSceneAsset(scene, 'image', {
+          url: res.data.image_url,
+          provider: imageSettings.provider,
+          model: imageSettings.model,
+          source: 'manual',
+          title: `Regenerated keyframe ${scene.scene_index + 1}`,
+        })
+      }
+      const updated = project.scenes.map((s) =>
+        s.scene_index === scene.scene_index
+          ? {
+              ...s,
+              image_url: res.data.image_url,
+              image_status: 'done' as GenerationStatus,
+              generation_error: undefined,
+              video_url: undefined,
+              video_status: 'idle' as GenerationStatus,
+              video_error: undefined,
+            }
+          : s
+      )
+      setScenes(updated, project.analysis)
+      message.success('场景图片已更新')
+    } catch (error) {
+      const errorMessage = getErrorMessage(error)
+      addGenerationLog({
+        type: 'image',
+        status: 'error',
+        title: `重新生成关键帧 ${scene.scene_index + 1}`,
+        provider: imageSettings.provider,
+        model: imageSettings.model,
+        sceneIndex: scene.scene_index,
+        sceneTitle: scene.title,
+        error: errorMessage,
+        durationMs: Date.now() - sceneStartedAt,
+      })
+      markScene({
+        image_status: 'error',
+        generation_error: errorMessage,
+      })
+      message.error('重新生成失败')
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* 头部 */}
+      <div
+        style={{
+          padding: '12px 18px',
+          borderBottom: '1px solid var(--app-border)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          background: 'var(--app-bg)',
+        }}
+      >
+        <Space>
+          <Title level={5} className="section-title">
+            智能分镜
+          </Title>
+          {project.scenes.length > 0 && (
+            <Tag style={{ background: `${accent}22`, border: `1px solid ${accent}55`, color: accent, fontSize: 11 }}>
+              {project.scenes.length} 个镜头
+            </Tag>
+          )}
+        </Space>
+
+        <Space size={8}>
+        <Button
+          size="small"
+          icon={<LockOutlined />}
+          onClick={() => setVisualLockDrawerOpen(true)}
+          type={project.visualLock?.enabled ? 'primary' : 'default'}
+          style={{ borderRadius: 6, fontSize: 12 }}
+        >
+          视觉设定{project.visualLock?.enabled ? ' 已锁定' : ''}
+        </Button>
+        <Button
+          size="small"
+          icon={<AppstoreOutlined />}
+          onClick={() => setAssetDrawerOpen(true)}
+          style={{ borderRadius: 6, fontSize: 12 }}
+        >
+          素材库{project.assets?.length ? ` ${project.assets.length}` : ''}
+        </Button>
+        <Button
+          size="small"
+          icon={<HistoryOutlined />}
+          onClick={() => setLogDrawerOpen(true)}
+          style={{ borderRadius: 6, fontSize: 12 }}
+        >
+          任务历史{project.generationLogs?.length ? ` ${project.generationLogs.length}` : ''}
+        </Button>
+        <Button
+          size="small"
+          icon={isImageQueueRunning ? <StopOutlined /> : <ReloadOutlined />}
+          danger={isImageQueueRunning}
+          onClick={isImageQueueRunning ? handleCancelImageQueue : () => runKeyframeQueue('all')}
+          disabled={project.scenes.length === 0 || isGenerating || isVideoQueueRunning}
+          style={{ borderRadius: 6, fontSize: 12 }}
+        >
+          {isImageQueueRunning ? '取消关键帧' : '生成全部关键帧'}
+        </Button>
+        <Button
+          size="small"
+          icon={<ReloadOutlined />}
+          onClick={() => runKeyframeQueue('failed')}
+          disabled={project.scenes.length === 0 || isGenerating || isImageQueueRunning || isVideoQueueRunning}
+          style={{ borderRadius: 6, fontSize: 12 }}
+        >
+          重试失败关键帧
+        </Button>
+        <Button
+          size="small"
+          icon={isVideoQueueRunning ? <StopOutlined /> : <VideoCameraOutlined />}
+          danger={isVideoQueueRunning}
+          onClick={isVideoQueueRunning ? handleCancelVideoQueue : () => runVideoQueue('all')}
+          disabled={project.scenes.length === 0 || isGenerating || isImageQueueRunning}
+          style={{ borderRadius: 6, fontSize: 12 }}
+        >
+          {isVideoQueueRunning ? '取消视频' : '生成动态片段'}
+        </Button>
+        <Button
+          size="small"
+          icon={<ReloadOutlined />}
+          onClick={() => runVideoQueue('failed')}
+          disabled={project.scenes.length === 0 || isGenerating || isImageQueueRunning || isVideoQueueRunning}
+          style={{ borderRadius: 6, fontSize: 12 }}
+        >
+          重试失败视频
+        </Button>
+        <Button
+          type="primary"
+          size="small"
+          icon={<ThunderboltOutlined />}
+          loading={isGenerating}
+          onClick={handleGenerate}
+          disabled={project.lyrics.filter((l) => !l.skip).length === 0 || isImageQueueRunning || isVideoQueueRunning}
+          style={{
+            background: isGenerating ? undefined : `linear-gradient(135deg, #7c3aed, #9d5ff5)`,
+            border: 'none',
+            borderRadius: 6,
+            fontSize: 12,
+          }}
+        >
+          {project.scenes.length > 0 ? '重新分镜' : '智能分镜'}
+        </Button>
+        </Space>
+      </div>
+
+      {/* 分析摘要 */}
+      {generationEstimate.validLyrics > 0 && (
+        <div
+          style={{
+            margin: '12px 12px 0',
+            padding: '10px 14px',
+            background: 'var(--app-surface)',
+            border: '1px solid var(--app-border)',
+            borderRadius: 8,
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 8,
+            alignItems: 'center',
+          }}
+        >
+          <Text style={{ color: 'var(--app-text-muted)', fontSize: 12 }}>
+            生成预估
+          </Text>
+          <Tag style={{ margin: 0, borderRadius: 5 }}>
+            {generationEstimate.validLyrics} 行有效歌词
+          </Tag>
+          <Tag color="blue" style={{ margin: 0, borderRadius: 5 }}>
+            约 {generationEstimate.estimatedSceneCount} 个镜头
+          </Tag>
+          <Tag color="purple" style={{ margin: 0, borderRadius: 5 }}>
+            {generationEstimate.imageProviderLabel} · {generationEstimate.imageJobs} 张图
+          </Tag>
+          <Tag color={videoSettings.provider === 'none' ? 'default' : 'cyan'} style={{ margin: 0, borderRadius: 5 }}>
+            {generationEstimate.videoProviderLabel} · {generationEstimate.videoJobs} 段视频
+          </Tag>
+          <Tag color="gold" style={{ margin: 0, borderRadius: 5 }}>
+            {generationEstimate.timeText}
+          </Tag>
+          <Tooltip title="这是按当前模型和镜头数量给出的保守估算；付费平台的实际价格以供应商账单为准。">
+            <Tag color={generationEstimate.costText.includes('可能') ? 'orange' : 'green'} style={{ margin: 0, borderRadius: 5 }}>
+              {generationEstimate.costText}
+            </Tag>
+          </Tooltip>
+        </div>
+      )}
+
+      {project.analysis && (
+        <div
+          style={{
+            margin: '12px 12px 0',
+            padding: '10px 14px',
+            background: 'var(--app-surface)',
+            border: `1px solid ${accent}33`,
+            borderRadius: 8,
+          }}
+        >
+          <Text style={{ color: accent, fontSize: 12 }}>
+            <InfoCircleOutlined style={{ marginRight: 6 }} />
+            {project.analysis.summary}
+          </Text>
+        </div>
+      )}
+
+      {/* 场景列表 */}
+      <div style={{ flex: 1, overflow: 'auto', padding: 12 }}>
+        {project.scenes.length === 0 ? (
+          <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description={
+                <div style={{ textAlign: 'center' }}>
+                  <Text style={{ color: '#475569', display: 'block', marginBottom: 8 }}>
+                    点击「智能分镜」
+                  </Text>
+                  <Text style={{ color: '#374151', fontSize: 12 }}>
+                    AI 会先理解全曲主题，再自动拆分镜头和生成画面
+                  </Text>
+                </div>
+              }
+            />
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
+            {project.scenes.map((scene) => (
+              <div
+                key={scene.scene_index}
+                onClick={() => onSceneSelect(scene)}
+                style={{
+                  borderRadius: 10,
+                  overflow: 'hidden',
+                  cursor: 'pointer',
+                  border: selectedSceneIndex === scene.scene_index
+                    ? `1px solid ${accent}88`
+                    : '1px solid var(--app-border)',
+                  transition: 'all 0.2s',
+                  background: selectedSceneIndex === scene.scene_index
+                    ? `${accent}11`
+                    : 'var(--app-surface)',
+                }}
+              >
+                {/* 场景图片 */}
+                <div style={{ position: 'relative', aspectRatio: '16/9' }}>
+                  {scene.image_url ? (
+                    <img
+                      src={scene.image_url}
+                      alt={scene.title}
+                      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                    />
+                  ) : (
+                    <div style={{
+                      width: '100%', height: '100%',
+                      background: 'var(--app-surface-raised)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      <Text style={{ color: 'var(--app-text-subtle)', fontSize: 12 }}>等待生成</Text>
+                    </div>
+                  )}
+
+                  {/* 时间标签 */}
+                  <div style={{
+                    position: 'absolute', top: 6, left: 6,
+                    background: 'rgba(0,0,0,0.6)',
+                    padding: '2px 8px', borderRadius: 6,
+                    backdropFilter: 'blur(4px)',
+                  }}>
+                    <Text style={{ color: '#fff', fontSize: 10 }}>
+                      {formatTime(scene.start_time)} → {formatTime(scene.end_time)}
+                    </Text>
+                  </div>
+
+                  {/* 重新生成按钮 */}
+                  <Tooltip title="重新生成此分镜">
+                    <div
+                      onClick={(e) => regenerateScene(scene, e)}
+                      style={{
+                        position: 'absolute', top: 6, right: 6,
+                        width: 26, height: 26, borderRadius: 6,
+                        background: 'rgba(0,0,0,0.6)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        cursor: 'pointer',
+                        backdropFilter: 'blur(4px)',
+                      }}
+                    >
+                      <ReloadOutlined style={{ fontSize: 11, color: '#fff' }} />
+                    </div>
+                  </Tooltip>
+
+                  <Tooltip title="编辑镜头">
+                    <div
+                      onClick={(e) => handleOpenEdit(scene, e)}
+                      style={{
+                        position: 'absolute', top: 6, right: 38,
+                        width: 26, height: 26, borderRadius: 6,
+                        background: 'rgba(0,0,0,0.6)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        cursor: 'pointer',
+                        backdropFilter: 'blur(4px)',
+                      }}
+                    >
+                      <EditOutlined style={{ fontSize: 11, color: '#fff' }} />
+                    </div>
+                  </Tooltip>
+
+                  {scene.scene_index < project.scenes.length - 1 && (
+                    <Tooltip title="与下一镜头合并">
+                      <div
+                        onClick={(e) => handleMergeScene(scene, 'next', e)}
+                        style={{
+                          position: 'absolute', top: 6, right: 70,
+                          width: 26, height: 26, borderRadius: 6,
+                          background: 'rgba(0,0,0,0.6)',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          cursor: 'pointer',
+                          backdropFilter: 'blur(4px)',
+                        }}
+                      >
+                        <CompressOutlined style={{ fontSize: 11, color: '#fff' }} />
+                      </div>
+                    </Tooltip>
+                  )}
+                </div>
+
+                {/* 场景信息 */}
+                <div style={{ padding: '10px 12px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                    <Text style={{ color: '#e2e8f0', fontSize: 13, fontWeight: 500 }}>
+                      {scene.title}
+                    </Text>
+                    <Tooltip title={scene.generation_error || '关键帧图片状态'}>
+                      <Tag color={imageStatusMeta[scene.image_status ?? 'idle'].color} style={{ fontSize: 10, margin: 0 }}>
+                        {imageStatusMeta[scene.image_status ?? 'idle'].label}
+                      </Tag>
+                    </Tooltip>
+                    <Tooltip title={scene.video_error || '视频片段状态'}>
+                      <Tag color={videoStatusMeta[scene.video_status ?? 'idle'].color} style={{ fontSize: 10, margin: 0 }}>
+                        {videoStatusMeta[scene.video_status ?? 'idle'].label}
+                      </Tag>
+                    </Tooltip>
+                    <Tag style={{
+                      fontSize: 10, margin: 0,
+                      background: `${accent}22`,
+                      border: `1px solid ${accent}44`,
+                      color: accent,
+                    }}>
+                      {scene.lyric_ids.length} 行歌词
+                    </Tag>
+                  </div>
+                  <Text style={{ color: 'var(--app-text-subtle)', fontSize: 11 }} ellipsis>
+                    {scene.description}
+                  </Text>
+                  {scene.camera_motion && (
+                    <Text style={{ color: '#6f7785', fontSize: 10, display: 'block', marginTop: 6 }} ellipsis>
+                      {scene.shot_type} · {scene.camera_motion}
+                    </Text>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <Drawer
+        title="视觉设定锁定"
+        open={isVisualLockDrawerOpen}
+        width={520}
+        onClose={() => setVisualLockDrawerOpen(false)}
+        footer={
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <Button onClick={() => setVisualLockDrawerOpen(false)}>取消</Button>
+            <Button type="primary" onClick={handleSaveVisualLock}>保存设定</Button>
+          </div>
+        }
+      >
+        <Form layout="vertical" form={visualLockForm} initialValues={{ enabled: false }}>
+          <Form.Item
+            label="启用视觉锁定"
+            name="enabled"
+            valuePropName="checked"
+            extra="开启后，智能分镜和后续关键帧生成都会优先遵守这套设定。"
+          >
+            <Switch />
+          </Form.Item>
+
+          <Form.Item label="主角 / 核心主体" name="mainSubject">
+            <Input.TextArea rows={2} placeholder="例如：一位白衣琵琶女子，清冷、克制，始终作为画面核心" />
+          </Form.Item>
+
+          <Form.Item label="服装 / 外观" name="wardrobe">
+            <Input.TextArea rows={2} placeholder="例如：银白披帛、浅青长裙、玉簪、无现代元素" />
+          </Form.Item>
+
+          <Form.Item label="固定世界 / 场景" name="setting">
+            <Input.TextArea rows={2} placeholder="例如：秋夜江面、古船、月光、远山薄雾，保持唐风古典世界" />
+          </Form.Item>
+
+          <Form.Item label="色调 / 光线" name="palette">
+            <Input.TextArea rows={2} placeholder="例如：冷月白、墨青、暗金点缀，柔和低饱和电影光" />
+          </Form.Item>
+
+          <Form.Item label="反复出现的视觉意象" name="symbols">
+            <Input.TextArea rows={2} placeholder="例如：琵琶、江月、枫叶、灯火、细雨、水纹" />
+          </Form.Item>
+
+          <Form.Item label="禁止项" name="negativePrompt">
+            <Input.TextArea rows={3} placeholder="例如：现代服饰、赛博城市、文字、水印、卡通低幼、角色频繁变脸" />
+          </Form.Item>
+        </Form>
+      </Drawer>
+
+      <Drawer
+        title="项目素材库"
+        open={isAssetDrawerOpen}
+        width={760}
+        onClose={() => setAssetDrawerOpen(false)}
+        extra={
+          <Button
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            disabled={projectAssets.length === 0}
+            onClick={clearProjectAssets}
+          >
+            清空
+          </Button>
+        }
+      >
+        <Tabs
+          items={[
+            {
+              key: 'images',
+              label: `图片 ${imageAssets.length}`,
+              children: imageAssets.length ? (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
+                  {imageAssets.map((asset) => (
+                    <div
+                      key={asset.id}
+                      style={{
+                        borderRadius: 8,
+                        overflow: 'hidden',
+                        background: 'var(--app-surface)',
+                        border: '1px solid var(--app-border)',
+                      }}
+                    >
+                      {asset.url && (
+                        <div style={{ aspectRatio: '16/9', background: 'var(--app-surface-raised)' }}>
+                          <img
+                            src={asset.url}
+                            alt={asset.title}
+                            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                          />
+                        </div>
+                      )}
+                      <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        <Text style={{ color: 'var(--app-text)', fontSize: 13, fontWeight: 600 }} ellipsis>
+                          {asset.title}
+                        </Text>
+                        <Space size={6} wrap>
+                          <Tag style={{ margin: 0 }}>{assetTypeLabel[asset.type]}</Tag>
+                          {typeof asset.sceneIndex === 'number' && <Tag style={{ margin: 0 }}>镜头 {asset.sceneIndex + 1}</Tag>}
+                          {asset.provider && <Tag style={{ margin: 0 }}>{asset.provider}</Tag>}
+                        </Space>
+                        <Text style={{ color: 'var(--app-text-subtle)', fontSize: 11 }}>
+                          {formatLogTime(asset.createdAt)}
+                        </Text>
+                        <Space size={6} wrap>
+                          <Button size="small" icon={<EyeOutlined />} onClick={() => handleFocusAssetScene(asset)}>
+                            定位
+                          </Button>
+                          <Button size="small" icon={<CopyOutlined />} onClick={() => copyToClipboard(asset.prompt)}>
+                            Prompt
+                          </Button>
+                          <Button size="small" icon={<CopyOutlined />} onClick={() => copyToClipboard(asset.url)}>
+                            URL
+                          </Button>
+                        </Space>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无图片素材" />
+              ),
+            },
+            {
+              key: 'videos',
+              label: `视频 ${videoAssets.length}`,
+              children: videoAssets.length ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {videoAssets.map((asset) => (
+                    <div
+                      key={asset.id}
+                      style={{
+                        padding: 12,
+                        borderRadius: 8,
+                        background: 'var(--app-surface)',
+                        border: '1px solid var(--app-border)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 8,
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                        <Text style={{ color: 'var(--app-text)', fontSize: 13, fontWeight: 600 }}>
+                          {asset.title}
+                        </Text>
+                        <Text style={{ color: 'var(--app-text-subtle)', fontSize: 11 }}>
+                          {formatLogTime(asset.createdAt)}
+                        </Text>
+                      </div>
+                      <Space size={6} wrap>
+                        {typeof asset.sceneIndex === 'number' && <Tag style={{ margin: 0 }}>镜头 {asset.sceneIndex + 1}</Tag>}
+                        {asset.provider && <Tag style={{ margin: 0 }}>{asset.provider}</Tag>}
+                        {asset.model && <Tag style={{ margin: 0 }}>{asset.model}</Tag>}
+                      </Space>
+                      {asset.url && (
+                        <Text style={{ color: 'var(--app-text-subtle)', fontSize: 12 }} ellipsis>
+                          {asset.url}
+                        </Text>
+                      )}
+                      <Space size={6} wrap>
+                        <Button size="small" icon={<EyeOutlined />} onClick={() => handleFocusAssetScene(asset)}>
+                          定位
+                        </Button>
+                        <Button size="small" icon={<CopyOutlined />} onClick={() => copyToClipboard(asset.videoPrompt || asset.prompt)}>
+                          Prompt
+                        </Button>
+                        <Button size="small" icon={<CopyOutlined />} onClick={() => copyToClipboard(asset.url)}>
+                          URL
+                        </Button>
+                      </Space>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无视频素材" />
+              ),
+            },
+            {
+              key: 'prompts',
+              label: `Prompt ${promptAssets.length}`,
+              children: promptAssets.length ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {promptAssets.map((asset) => (
+                    <div
+                      key={`prompt-${asset.id}`}
+                      style={{
+                        padding: 12,
+                        borderRadius: 8,
+                        background: 'var(--app-surface)',
+                        border: '1px solid var(--app-border)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 8,
+                      }}
+                    >
+                      <Space size={6} wrap>
+                        <Tag style={{ margin: 0 }}>{asset.sceneTitle || asset.title}</Tag>
+                        {typeof asset.sceneIndex === 'number' && <Tag style={{ margin: 0 }}>镜头 {asset.sceneIndex + 1}</Tag>}
+                        {asset.provider && <Tag style={{ margin: 0 }}>{asset.provider}</Tag>}
+                      </Space>
+                      {asset.prompt && (
+                        <Input.TextArea value={asset.prompt} rows={4} readOnly />
+                      )}
+                      {asset.videoPrompt && (
+                        <Input.TextArea value={asset.videoPrompt} rows={3} readOnly />
+                      )}
+                      <Space size={6} wrap>
+                        <Button size="small" icon={<EyeOutlined />} onClick={() => handleFocusAssetScene(asset)}>
+                          定位
+                        </Button>
+                        <Button size="small" icon={<CopyOutlined />} onClick={() => copyToClipboard(asset.prompt)}>
+                          复制图片 Prompt
+                        </Button>
+                        <Button size="small" icon={<CopyOutlined />} onClick={() => copyToClipboard(asset.videoPrompt)}>
+                          复制视频 Prompt
+                        </Button>
+                      </Space>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 Prompt 版本" />
+              ),
+            },
+          ]}
+        />
+      </Drawer>
+
+      <Drawer
+        title="任务历史"
+        open={isLogDrawerOpen}
+        width={560}
+        onClose={() => setLogDrawerOpen(false)}
+        extra={
+          <Button
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            disabled={!project.generationLogs?.length}
+            onClick={clearGenerationLogs}
+          >
+            清空
+          </Button>
+        }
+      >
+        {project.generationLogs?.length ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {project.generationLogs.map((log) => (
+              <div
+                key={log.id}
+                style={{
+                  padding: 12,
+                  borderRadius: 8,
+                  background: 'var(--app-surface)',
+                  border: '1px solid var(--app-border)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                  <Space size={6} wrap>
+                    <Tag color={logStatusMeta[log.status].color} style={{ margin: 0 }}>
+                      {logStatusMeta[log.status].label}
+                    </Tag>
+                    <Tag style={{ margin: 0 }}>{logTypeLabel[log.type]}</Tag>
+                    {typeof log.sceneIndex === 'number' && (
+                      <Tag style={{ margin: 0 }}>镜头 {log.sceneIndex + 1}</Tag>
+                    )}
+                  </Space>
+                  <Text style={{ color: 'var(--app-text-subtle)', fontSize: 11 }}>
+                    {formatLogTime(log.createdAt)}
+                  </Text>
+                </div>
+
+                <div>
+                  <Text style={{ color: 'var(--app-text)', fontSize: 13, fontWeight: 600 }}>
+                    {log.title}
+                  </Text>
+                  {log.sceneTitle && (
+                    <Text style={{ color: 'var(--app-text-subtle)', fontSize: 12, display: 'block', marginTop: 2 }}>
+                      {log.sceneTitle}
+                    </Text>
+                  )}
+                </div>
+
+                <Space size={8} wrap>
+                  {log.provider && (
+                    <Text style={{ color: 'var(--app-text-muted)', fontSize: 12 }}>
+                      模型：{log.provider}{log.model ? ` / ${log.model}` : ''}
+                    </Text>
+                  )}
+                  {log.durationMs !== undefined && (
+                    <Text style={{ color: 'var(--app-text-muted)', fontSize: 12 }}>
+                      耗时：{formatDurationMs(log.durationMs)}
+                    </Text>
+                  )}
+                </Space>
+
+                {log.message && (
+                  <Text style={{ color: 'var(--app-text-muted)', fontSize: 12, lineHeight: 1.6 }}>
+                    {log.message}
+                  </Text>
+                )}
+                {log.error && (
+                  <Text style={{ color: '#fca5a5', fontSize: 12, lineHeight: 1.6 }}>
+                    {log.error}
+                  </Text>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无生成记录" />
+        )}
+      </Drawer>
+
+      <Drawer
+        title="编辑镜头"
+        open={Boolean(editingScene)}
+        width={520}
+        onClose={() => setEditingSceneIndex(null)}
+        footer={
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <Button onClick={() => setEditingSceneIndex(null)}>取消</Button>
+            <Button type="primary" onClick={handleSaveSceneEdit}>保存镜头</Button>
+          </div>
+        }
+      >
+        {editingScene && (
+          <Form layout="vertical" form={editForm}>
+            <Form.Item label="镜头标题" name="title" rules={[{ required: true, message: '请输入镜头标题' }]}>
+              <Input />
+            </Form.Item>
+
+            <Form.Item label="歌词 / 镜头描述" name="description" rules={[{ required: true, message: '请输入镜头描述' }]}>
+              <Input.TextArea rows={3} />
+            </Form.Item>
+
+            <Space size={10} style={{ width: '100%' }} align="start">
+              <Form.Item label="情绪" name="mood" style={{ flex: 1 }}>
+                <Input placeholder="calm cinematic opening" />
+              </Form.Item>
+              <Form.Item label="转场" name="transition" style={{ flex: 1 }}>
+                <Select options={transitionOptions} />
+              </Form.Item>
+            </Space>
+
+            <Form.Item label="视觉母题" name="visual">
+              <Input.TextArea rows={2} placeholder="例如：月下江面、琵琶弦、飞花、孤舟" />
+            </Form.Item>
+
+            <Space size={10} style={{ width: '100%' }} align="start">
+              <Form.Item label="镜头类型" name="shot_type" style={{ flex: 1 }}>
+                <Select options={shotTypeOptions} />
+              </Form.Item>
+              <Form.Item label="镜头运动" name="camera_motion" style={{ flex: 1 }}>
+                <Select options={cameraMotionOptions} />
+              </Form.Item>
+            </Space>
+
+            <Form.Item
+              label="图片 Prompt"
+              name="prompt"
+              rules={[{ required: true, message: '请输入图片 Prompt' }]}
+              extra="用于重新生成关键帧图片。"
+            >
+              <Input.TextArea rows={6} />
+            </Form.Item>
+
+            <Form.Item
+              label="视频 Prompt"
+              name="video_prompt"
+              extra="后续接入 Kling / Runway / Luma 时使用；本地动态导出也会参考镜头运动。"
+            >
+              <Input.TextArea rows={4} />
+            </Form.Item>
+
+            <Form.Item label="图片 URL" name="image_url">
+              <Input />
+            </Form.Item>
+
+            <div
+              className="glass-card"
+              style={{
+                padding: 12,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 6,
+              }}
+            >
+              <Text style={{ color: 'var(--app-text-muted)', fontSize: 12 }}>
+                时间段：{formatTime(editingScene.start_time)} → {formatTime(editingScene.end_time)}
+              </Text>
+              <Text style={{ color: 'var(--app-text-muted)', fontSize: 12 }}>
+                包含歌词：{editingScene.lyric_ids.length} 行
+              </Text>
+              <Text style={{ color: 'var(--app-text-subtle)', fontSize: 11 }}>
+                合并或拆分后会自动重排镜头序号，并同步歌词映射。
+              </Text>
+            </div>
+
+            <div
+              className="glass-card"
+              style={{
+                padding: 12,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 10,
+                marginTop: 12,
+              }}
+            >
+              <Text style={{ color: 'var(--app-text)', fontSize: 13, fontWeight: 600 }}>
+                镜头结构
+              </Text>
+
+              <Space size={8}>
+                <Button
+                  icon={<CompressOutlined />}
+                  onClick={() => handleMergeScene(editingScene, 'previous')}
+                  disabled={editingScene.scene_index === 0}
+                >
+                  合并上一镜头
+                </Button>
+                <Button
+                  icon={<CompressOutlined />}
+                  onClick={() => handleMergeScene(editingScene, 'next')}
+                  disabled={editingScene.scene_index >= project.scenes.length - 1}
+                >
+                  合并下一镜头
+                </Button>
+              </Space>
+
+              <div>
+                <Text style={{ color: 'var(--app-text-muted)', fontSize: 12, display: 'block', marginBottom: 6 }}>
+                  拆分位置
+                </Text>
+                <Space.Compact style={{ width: '100%' }}>
+                  <Select
+                    value={splitAfterLyricId}
+                    onChange={setSplitAfterLyricId}
+                    disabled={editingScene.lyric_ids.length <= 1}
+                    options={editingScene.lyric_ids.slice(0, -1).map((id, index) => {
+                      const lyric = project.lyrics.find((line) => line.id === id)
+                      return {
+                        value: id,
+                        label: `第 ${index + 1} 行后：${lyric?.text ?? id}`,
+                      }
+                    })}
+                    style={{ width: 'calc(100% - 104px)' }}
+                  />
+                  <Button
+                    icon={<SplitCellsOutlined />}
+                    onClick={handleSplitScene}
+                    disabled={editingScene.lyric_ids.length <= 1}
+                  >
+                    拆分
+                  </Button>
+                </Space.Compact>
+              </div>
+            </div>
+          </Form>
+        )}
+      </Drawer>
+    </div>
+  )
+}
+
+export default StoryboardPanel
