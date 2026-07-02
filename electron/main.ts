@@ -114,6 +114,24 @@ function getModelSettingsPath() {
   return path.join(app.getPath('userData'), 'model-settings.json')
 }
 
+function getRendererDiagnosticsPath() {
+  return path.join(app.getPath('userData'), 'renderer-diagnostics.log')
+}
+
+async function writeRendererDiagnostic(event: string, details: unknown = {}) {
+  try {
+    const logPath = getRendererDiagnosticsPath()
+    await fs.mkdir(path.dirname(logPath), { recursive: true })
+    await fs.appendFile(
+      logPath,
+      `${JSON.stringify({ time: new Date().toISOString(), event, details })}\n`,
+      'utf8'
+    )
+  } catch (error) {
+    console.error('Unable to write renderer diagnostics', error)
+  }
+}
+
 function normalizeModelSettings(payload: unknown): PersistedModelSettings {
   if (!payload || typeof payload !== 'object') {
     return {}
@@ -1247,7 +1265,7 @@ async function startBackend() {
   })
 }
 
-function createWindow() {
+function createWindow(recovery?: { reason: string; exitCode: number }) {
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -1264,24 +1282,88 @@ function createWindow() {
     title: 'AI Music Video Generator',
   })
 
+  const window = mainWindow
+  const rendererEntry = path.join(__dirname, '../dist/index.html')
+
+  window.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level < 2) return
+    void writeRendererDiagnostic('console-message', { level, message, line, sourceId })
+  })
+
+  window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    void writeRendererDiagnostic('did-fail-load', {
+      errorCode,
+      errorDescription,
+      validatedURL,
+      isMainFrame,
+    })
+  })
+
+  window.webContents.on('unresponsive', () => {
+    void writeRendererDiagnostic('unresponsive', { url: window.webContents.getURL() })
+  })
+
+  window.webContents.on('render-process-gone', async (_event, details) => {
+    await writeRendererDiagnostic('render-process-gone', {
+      reason: details.reason,
+      exitCode: details.exitCode,
+      url: window.webContents.getURL(),
+    })
+
+    if (window.isDestroyed() || mainWindow !== window) return
+
+    // A modal attached to a crashed BrowserWindow is not reliable on Windows.
+    // Replace the window immediately, then report recovery from the healthy one.
+    createWindow({ reason: details.reason, exitCode: details.exitCode })
+    window.destroy()
+  })
+
+  window.webContents.on('will-navigate', (event, targetUrl) => {
+    const allowed = isDev
+      ? targetUrl.startsWith('http://localhost:5173')
+      : targetUrl.startsWith('file:')
+    if (!allowed) {
+      event.preventDefault()
+      void writeRendererDiagnostic('blocked-navigation', { targetUrl })
+    }
+  })
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    void writeRendererDiagnostic('blocked-window-open', { url })
+    return { action: 'deny' }
+  })
+
+  window.once('ready-to-show', () => {
+    window.show()
+    if (recovery) {
+      void dialog.showMessageBox(window, {
+        type: 'warning',
+        title: '页面已自动恢复',
+        message: '页面进程异常退出，应用已创建新的安全窗口。',
+        detail: `原因：${recovery.reason}（退出码 ${recovery.exitCode}）。诊断信息已保存；未保存的导入状态需要重新导入。`,
+        buttons: ['知道了'],
+        defaultId: 0,
+        noLink: true,
+      })
+    }
+  })
+
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173').catch(() => {
-      mainWindow?.loadFile(path.join(__dirname, '../dist/index.html'))
+      mainWindow?.loadFile(rendererEntry)
     })
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
+    mainWindow.loadFile(rendererEntry)
   }
 
   if (isDev) {
     mainWindow.webContents.openDevTools()
   }
 
-  mainWindow.once('ready-to-show', () => {
-    mainWindow?.show()
-  })
-
-  mainWindow.on('closed', () => {
-    mainWindow = null
+  window.on('closed', () => {
+    if (mainWindow === window) {
+      mainWindow = null
+    }
   })
 }
 

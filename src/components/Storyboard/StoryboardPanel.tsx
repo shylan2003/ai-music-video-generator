@@ -21,6 +21,7 @@ import axios from 'axios'
 import { apiClient } from '@/api/client'
 import { useAppStore, type GenerationLog, type GenerationStatus, type ImageGenerationSettings, type LyricLine, type ProjectAsset, type Scene, type StoryAnalysis, type VisualLockSettings } from '@/store/useAppStore'
 import { normalizeGenerationStatus } from '@/utils/generationStatus'
+import { buildLyricTimingEnergy } from '@/utils/musicEnergy'
 
 
 const { Text, Title } = Typography
@@ -602,49 +603,6 @@ const formatMinutesRange = (minSeconds: number, maxSeconds: number) => {
   return minMinutes === maxMinutes ? `约 ${minMinutes} 分钟` : `约 ${minMinutes}-${maxMinutes} 分钟`
 }
 
-const analyzeMusicEnergy = async (source?: string) => {
-  if (!source || typeof AudioContext === 'undefined') return []
-  let audioContext: AudioContext | undefined
-  try {
-    const response = await fetch(source)
-    if (!response.ok) return []
-    audioContext = new AudioContext()
-    const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer())
-    const windowSeconds = 0.5
-    const windowSamples = Math.max(1, Math.floor(audioBuffer.sampleRate * windowSeconds))
-    const points: Array<{ time: number; value: number }> = []
-    for (let start = 0; start < audioBuffer.length; start += windowSamples) {
-      const end = Math.min(audioBuffer.length, start + windowSamples)
-      let squareSum = 0
-      let sampleCount = 0
-      const stride = 32
-      for (let channel = 0; channel < audioBuffer.numberOfChannels; channel += 1) {
-        const data = audioBuffer.getChannelData(channel)
-        for (let index = start; index < end; index += stride) {
-          squareSum += data[index] * data[index]
-          sampleCount += 1
-        }
-      }
-      points.push({
-        time: start / audioBuffer.sampleRate,
-        value: sampleCount ? Math.sqrt(squareSum / sampleCount) : 0,
-      })
-    }
-    const values = points.map((point) => point.value)
-    const floor = Math.min(...values)
-    const ceiling = Math.max(...values)
-    const range = Math.max(ceiling - floor, 0.000001)
-    return points.map((point) => ({
-      time: Number(point.time.toFixed(3)),
-      value: Number(((point.value - floor) / range).toFixed(4)),
-    }))
-  } catch {
-    return []
-  } finally {
-    await audioContext?.close().catch(() => undefined)
-  }
-}
-
 const getGenerationEstimate = (
   lyrics: LyricLine[],
   scenes: Scene[],
@@ -1062,7 +1020,11 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
     message.loading({ content: 'AI 导演正在分析歌词并生成智能分镜...', key: 'storyboard' })
 
     try {
-      const musicEnergy = await analyzeMusicEnergy(project.musicFile)
+      // Decoding a complete 5-minute song in the renderer expands compressed audio
+      // into hundreds of MB of PCM and can terminate Electron's renderer. Lyric
+      // timing still gives the director useful density/section peaks without loading
+      // the whole audio file into memory.
+      const musicEnergy = buildLyricTimingEnergy(project.lyrics, project.duration)
       const res = await apiClient.post('/api/generate/smart-storyboard', {
         lyrics: project.lyrics,
         style: project.style,
