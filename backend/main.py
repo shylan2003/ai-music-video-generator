@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -70,13 +70,13 @@ def basic_video_quality(file_path: Path, requested_duration: float) -> tuple[str
         size = file_path.stat().st_size
         metrics["size_bytes"] = size
         if size < 100 * 1024:
-            errors.append("瑙嗛鏂囦欢灏忎簬 100KB锛屽彲鑳戒负绌烘垨鎹熷潖")
+            errors.append("视频文件小于 100KB，可能为空或损坏")
         with file_path.open("rb") as source:
             header = source.read(32)
         if b"ftyp" not in header:
-            errors.append("鏂囦欢缂哄皯 MP4 ftyp 鏍囪")
+            errors.append("文件缺少 MP4 ftyp 标记")
     except OSError as error:
-        errors.append(f"鏃犳硶璇诲彇瑙嗛鏂囦欢锛歿error}")
+        errors.append(f"无法读取视频文件：{error}")
 
     ffmpeg_binary = os.getenv("MUSIC_VIDEO_FFMPEG_PATH", "").strip()
     if ffmpeg_binary and Path(ffmpeg_binary).is_file() and not errors:
@@ -104,7 +104,7 @@ def basic_video_quality(file_path: Path, requested_duration: float) -> tuple[str
             )
             probe_output = result.stderr or ""
             if result.returncode != 0:
-                errors.append("FFmpeg 鏃犳硶瀹屾暣瑙ｇ爜璇ョ墖娈?)
+                errors.append("FFmpeg 无法完整解码该片段")
 
             duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", probe_output)
             if duration_match:
@@ -116,10 +116,10 @@ def basic_video_quality(file_path: Path, requested_duration: float) -> tuple[str
                 metrics["duration"] = round(actual_duration, 3)
                 if actual_duration + (1 / 30) < requested_duration:
                     errors.append(
-                        f"浜戠鐗囨浠?{actual_duration:.2f} 绉掞紝鐭簬闀滃ご鎵€闇€ {requested_duration:.2f} 绉?
+                        f"云端片段仅 {actual_duration:.2f} 秒，短于镜头所需 {requested_duration:.2f} 秒"
                     )
             else:
-                errors.append("鏃犳硶璇诲彇瑙嗛鏃堕暱")
+                errors.append("无法读取视频时长")
 
             video_match = re.search(
                 r"Video:.*?\b(\d{2,5})x(\d{2,5})\b.*?(\d+(?:\.\d+)?)\s*fps",
@@ -131,22 +131,22 @@ def basic_video_quality(file_path: Path, requested_duration: float) -> tuple[str
                 fps = float(video_match.group(3))
                 metrics.update({"width": width, "height": height, "fps": fps})
                 if width < 640 or height < 360:
-                    errors.append(f"浜戠鐗囨鍒嗚鲸鐜囪繃浣庯細{width}脳{height}")
+                    errors.append(f"云端片段分辨率过低：{width}×{height}")
                 if fps < 20:
-                    errors.append(f"浜戠鐗囨甯х巼杩囦綆锛歿fps:g}fps")
+                    errors.append(f"云端片段帧率过低：{fps:g}fps")
             else:
-                errors.append("鏃犳硶璇诲彇瑙嗛鍒嗚鲸鐜囨垨甯х巼")
+                errors.append("无法读取视频分辨率或帧率")
 
             black_durations = [float(value) for value in re.findall(r"black_duration:([0-9.]+)", probe_output)]
             freeze_durations = [float(value) for value in re.findall(r"freeze_duration:\s*([0-9.]+)", probe_output)]
             metrics["max_black_seconds"] = max(black_durations, default=0)
             metrics["max_freeze_seconds"] = max(freeze_durations, default=0)
             if metrics["max_black_seconds"] > 0.5:
-                errors.append(f"妫€娴嬪埌 {metrics['max_black_seconds']:.2f} 绉掕繛缁粦甯?)
+                errors.append(f"检测到 {metrics['max_black_seconds']:.2f} 秒连续黑帧")
             if metrics["max_freeze_seconds"] > 2.0:
-                errors.append(f"妫€娴嬪埌 {metrics['max_freeze_seconds']:.2f} 绉掕繛缁喕缁?)
+                errors.append(f"检测到 {metrics['max_freeze_seconds']:.2f} 秒连续冻结")
         except (OSError, subprocess.TimeoutExpired) as error:
-            errors.append(f"FFmpeg 璐ㄦ鏈畬鎴愶細{error}")
+            errors.append(f"FFmpeg 质检未完成：{error}")
     elif not ffmpeg_binary:
         metrics["probe"] = "ffmpeg_unavailable"
 
@@ -201,20 +201,20 @@ SESSION_TOKEN = os.getenv("MUSIC_VIDEO_SESSION_TOKEN", "").strip()
 async def verify_local_session(request: Request, call_next):
     if SESSION_TOKEN and request.url.path.startswith("/api/"):
         if request.headers.get("X-Music-Video-Token", "") != SESSION_TOKEN:
-            return JSONResponse(status_code=401, content={"detail": "鏈湴浼氳瘽浠ょ墝鏃犳晥"})
+            return JSONResponse(status_code=401, content={"detail": "本地会话令牌无效"})
     return await call_next(request)
 
 app.mount("/generated", StaticFiles(directory=str(GENERATED_DIR)), name="generated")
 app.mount("/generated-videos", StaticFiles(directory=str(GENERATED_VIDEO_DIR)), name="generated-videos")
 
-# 鈹€鈹€ 闈炴瓕璇嶈鍒ゆ柇 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── 非歌词行判断 ──────────────────────────────────────────
 NON_LYRIC_PATTERNS = [
-    r'^浣滆瘝[:锛歖', r'^浣滄洸[:锛歖', r'^缂栨洸[:锛歖',
-    r'^鍒朵綔[:锛歖', r'^鍑哄搧[:锛歖', r'^鐩戝埗[:锛歖',
-    r'^娣烽煶[:锛歖', r'^褰曢煶[:锛歖', r'^婕斿敱[:锛歖',
-    r'^缈诲敱[:锛歖', r'^鍘熷敱[:锛歖', r'^璇峓:锛歖', r'^鏇瞇:锛歖',
-    r'^[\u4e00-\u9fffA-Za-z0-9_\-\s]{1,8}[:锛歖\s*$',
-    r'^\[.*\]$', r'^銆?*銆?', r'^\s*$',
+    r'^作词[:：]', r'^作曲[:：]', r'^编曲[:：]',
+    r'^制作[:：]', r'^出品[:：]', r'^监制[:：]',
+    r'^混音[:：]', r'^录音[:：]', r'^演唱[:：]',
+    r'^翻唱[:：]', r'^原唱[:：]', r'^词[:：]', r'^曲[:：]',
+    r'^[\u4e00-\u9fffA-Za-z0-9_\-\s]{1,8}[:：]\s*$',
+    r'^\[.*\]$', r'^【.*】$', r'^\s*$',
 ]
 
 STYLE_KEYWORDS = {
@@ -236,32 +236,32 @@ STYLE_KEYWORDS = {
 }
 
 ARC_TEMPLATES = [
-    {"title": "搴忕珷", "mood": "calm cinematic opening"},
-    {"title": "閾哄灚", "mood": "gentle emotional build-up"},
-    {"title": "鎺ㄨ繘", "mood": "steady narrative progression"},
-    {"title": "杞姌", "mood": "subtle emotional turning point"},
-    {"title": "楂樻疆", "mood": "intense and powerful emotional peak"},
-    {"title": "鍥炲搷", "mood": "echoing chorus and recurring emotion"},
-    {"title": "浣欓煹", "mood": "reflective lingering aftertaste"},
-    {"title": "灏惧０", "mood": "quiet closing resolution"},
+    {"title": "序章", "mood": "calm cinematic opening"},
+    {"title": "铺垫", "mood": "gentle emotional build-up"},
+    {"title": "推进", "mood": "steady narrative progression"},
+    {"title": "转折", "mood": "subtle emotional turning point"},
+    {"title": "高潮", "mood": "intense and powerful emotional peak"},
+    {"title": "回响", "mood": "echoing chorus and recurring emotion"},
+    {"title": "余韵", "mood": "reflective lingering aftertaste"},
+    {"title": "尾声", "mood": "quiet closing resolution"},
 ]
 
 THEME_KEYWORDS = {
-    "farewell": ["鍒?, "绂?, "鏁?, "閫?, "褰?, "璧?, "杩滄柟"],
-    "memory": ["鍥炲繂", "浠庡墠", "鏇剧粡", "鏄ㄦ棩", "璁板緱", "寰€浜?],
-    "night": ["澶?, "鏈?, "鏄?, "鐏?, "姊?, "榛?, "鏅?, "榛庢槑"],
-    "journey": ["璺?, "椋?, "灞?, "娴?, "鑸?, "杩?, "绔?, "鏃呰"],
-    "city": ["鍩?, "琛?, "妤?, "绐?, "浜烘捣", "闇撹櫣", "宸?],
-    "emotion": ["蹇?, "娉?, "鐖?, "鎯冲康", "瀛ょ嫭", "瀵傚癁", "鎷ユ姳", "娓╂煍"],
-    "nature": ["闆?, "闆?, "浜?, "鑺?, "鍙?, "姹?, "娌?, "闆?, "娴?],
+    "farewell": ["别", "离", "散", "送", "归", "走", "远方"],
+    "memory": ["回忆", "从前", "曾经", "昨日", "记得", "往事"],
+    "night": ["夜", "月", "星", "灯", "梦", "黑", "晚", "黎明"],
+    "journey": ["路", "风", "山", "海", "船", "远", "站", "旅行"],
+    "city": ["城", "街", "楼", "窗", "人海", "霓虹", "巷"],
+    "emotion": ["心", "泪", "爱", "想念", "孤独", "寂寞", "拥抱", "温柔"],
+    "nature": ["雨", "雪", "云", "花", "叶", "江", "河", "雾", "海"],
 }
 
 SONG_TYPE_KEYWORDS = {
-    "narrative": ["閭ｅ勾", "鍚庢潵", "鏇剧粡", "浠庡皬", "闀垮ぇ", "鏉ュ埌", "绂诲紑", "鍥炲埌", "鐩搁€?, "鍛婂埆"],
-    "lyrical": ["鐖?, "鎯冲康", "蹇?, "娓╂煍", "瀛ょ嫭", "瀵傚癁", "娉?, "鎷ユ姳", "閬楁喚", "鎬濆康"],
-    "imagery": ["鏈?, "浜?, "椋?, "闆?, "闆?, "鑺?, "娴?, "灞?, "鏄?, "闆?, "鍏?, "姊?],
-    "performance": ["鑸炲彴", "鐏厜", "鑱氬厜鐏?, "鎺屽０", "楹﹀厠椋?, "瑙備紬", "婕斿敱", "涔愰槦", "骞曞竷"],
-    "duet": ["鐢凤細", "濂筹細", "鍚堬細", "瀵瑰敱", "浣犻棶", "鎴戠瓟", "浣犺", "鎴戣", "鎴戜滑"],
+    "narrative": ["那年", "后来", "曾经", "从小", "长大", "来到", "离开", "回到", "相逢", "告别"],
+    "lyrical": ["爱", "想念", "心", "温柔", "孤独", "寂寞", "泪", "拥抱", "遗憾", "思念"],
+    "imagery": ["月", "云", "风", "雨", "雪", "花", "海", "山", "星", "雾", "光", "梦"],
+    "performance": ["舞台", "灯光", "聚光灯", "掌声", "麦克风", "观众", "演唱", "乐队", "幕布"],
+    "duet": ["男：", "女：", "合：", "对唱", "你问", "我答", "你说", "我说", "我们"],
 }
 
 MIN_SEGMENT_LINES = 3
@@ -277,9 +277,9 @@ MAX_VISUAL_GROUP_TEXT_LENGTH = 36
 def looks_like_song_credit_header(text: str) -> bool:
     if len(text) > 48:
         return False
-    if re.search(r'[銆傦紵锛?!锛?锛?]', text):
+    if re.search(r'[。？！?!，,；;]', text):
         return False
-    return bool(re.match(r'^.{1,24}\s*[-鈥撯€擼\s*[\u4e00-\u9fffA-Za-z0-9_\s/锛?銆伮?]{1,30}$', text))
+    return bool(re.match(r'^.{1,24}\s*[-–—]\s*[\u4e00-\u9fffA-Za-z0-9_\s/／&、·.]{1,30}$', text))
 
 
 def is_non_lyric(text: str) -> bool:
@@ -289,25 +289,25 @@ def is_non_lyric(text: str) -> bool:
     for pattern in NON_LYRIC_PATTERNS:
         if re.match(pattern, stripped):
             return True
-    speaker_match = re.match(r'^([\u4e00-\u9fffA-Za-z0-9_\-\s]{1,8})[:锛歖\s*(.*)$', stripped)
+    speaker_match = re.match(r'^([\u4e00-\u9fffA-Za-z0-9_\-\s]{1,8})[:：]\s*(.*)$', stripped)
     if speaker_match and len(normalize_lyric_text(speaker_match.group(2))) < MIN_VISUAL_TEXT_LENGTH:
         return True
-    if re.match(r'^[A-Za-z\s:锛歖{1,20}$', stripped):
+    if re.match(r'^[A-Za-z\s:：]{1,20}$', stripped):
         return True
     return False
 
 
 def normalize_lyric_text(text: str) -> str:
-    return re.sub(r'[\s锛屻€傦紒锛熴€侊紱锛氣€溾€濃€樷€欙紙锛?)銆娿€嬨€愩€戔€︹€?.!?;:路-]+', '', text.strip().lower())
+    return re.sub(r'[\s，。！？、；：“”‘’（）()《》【】…—,.!?;:·-]+', '', text.strip().lower())
 
 
 def strip_trailing_speaker_label(text: str) -> str:
-    return re.sub(r'\s+[\u4e00-\u9fffA-Za-z0-9_\-\s]{1,8}[:锛歖\s*$', '', text.strip())
+    return re.sub(r'\s+[\u4e00-\u9fffA-Za-z0-9_\-\s]{1,8}[:：]\s*$', '', text.strip())
 
 
 def line_looks_complete(text: str) -> bool:
     stripped = text.strip()
-    return bool(re.search(r'[銆傦紒锛??锛?鈥$', stripped)) or len(stripped) >= 10
+    return bool(re.search(r'[。！？!?；;…]$', stripped)) or len(stripped) >= 10
 
 
 def detect_theme(text: str) -> str:
@@ -449,7 +449,7 @@ def build_global_summary(valid_lyrics: List["LyricLine"]) -> str:
             snippets.append(text)
         if len(snippets) >= 5:
             break
-    return "锛?.join(snippets)[:100]
+    return "，".join(snippets)[:100]
 
 
 def build_visual_lock_text(visual_lock: Optional["VisualLockConfig"] = None) -> str:
@@ -576,11 +576,11 @@ def build_director_analysis(valid_lyrics: List["LyricLine"], style: str, song_na
     summary = build_global_summary(valid_lyrics)
     style_keyword = STYLE_KEYWORDS.get(style, STYLE_KEYWORDS["cinematic"])
 
-    if any(keyword in full_text for keyword in ["鐞电惗", "寮?, "鏇?, "澹?, "涔?]):
+    if any(keyword in full_text for keyword in ["琵琶", "弦", "曲", "声", "乐"]):
         motif = "musical instrument strings, resonant sound waves, close-up hands, drifting petals and rippling water"
-    elif any(keyword in full_text for keyword in ["姹?, "娌?, "娴?, "鑸?, "鏈?]):
+    elif any(keyword in full_text for keyword in ["江", "河", "海", "船", "月"]):
         motif = "moonlit water, distant boat, mist, reflections, lonely shoreline"
-    elif any(keyword in full_text for keyword in ["鑺?, "闆?, "闆?, "浜?, "椋?]):
+    elif any(keyword in full_text for keyword in ["花", "雨", "雪", "云", "风"]):
         motif = "natural elements, soft weather, moving clouds, falling petals, seasonal atmosphere"
     else:
         motif = "a consistent symbolic protagonist moving through poetic spaces"
@@ -789,7 +789,7 @@ async def download_image_to_cache(url: str, file_path: Path, headers: Optional[d
                     async for chunk in response.aiter_bytes():
                         size += len(chunk)
                         if size > 40 * 1024 * 1024:
-                            raise RuntimeError("鍥剧墖瓒呰繃 40MB 涓嬭浇闄愬埗")
+                            raise RuntimeError("图片超过 40MB 下载限制")
                         target.write(chunk)
             partial_path.replace(file_path)
         except Exception:
@@ -814,7 +814,7 @@ async def download_video_to_cache(url: str, file_path: Path, headers: Optional[d
                     async for chunk in response.aiter_bytes():
                         size += len(chunk)
                         if size > 1024 * 1024 * 1024:
-                            raise RuntimeError("瑙嗛瓒呰繃 1GB 涓嬭浇闄愬埗")
+                            raise RuntimeError("视频超过 1GB 下载限制")
                         target.write(chunk)
             partial_path.replace(file_path)
         except Exception:
@@ -1019,7 +1019,7 @@ def build_lyric_group_scene_prompt(
     )
 
 
-# 鈹€鈹€ 鏁版嵁妯″瀷锛堝吋瀹?Python 3.10 浠ヤ笅鐗堟湰锛夆攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── 数据模型（兼容 Python 3.10 以下版本）──────────────────
 class LyricLine(BaseModel):
     id: str
     text: str
@@ -1160,7 +1160,7 @@ class BatchGenerateRequest(BaseModel):
     visual_lock: Optional[VisualLockConfig] = None
 
 
-# 鈹€鈹€ 鎺ュ彛 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── 接口 ──────────────────────────────────────────────────
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "message": "Backend is running"}
@@ -1219,7 +1219,7 @@ async def filter_lyrics(request: FilterRequest):
 
 @app.post("/api/generate/storyboard")
 async def generate_storyboard(request: StoryboardRequest):
-    """鎸夋钀藉垏鍒嗘瓕璇嶏紝鐢熸垚鏇寸粏鑷寸殑鍒嗛暅銆?""
+    """按段落切分歌词，生成更细致的分镜。"""
     try:
         valid_lyrics = [
             lyric.model_copy(update={"text": strip_trailing_speaker_label(lyric.text)})
@@ -1232,7 +1232,7 @@ async def generate_storyboard(request: StoryboardRequest):
                 "total_scenes": 0,
                 "valid_lyrics": 0,
                 "style": request.style,
-                "summary": "娌℃湁鏈夋晥姝岃瘝锛岃鍏堝鍏ユ瓕璇?
+                "summary": "没有有效歌词，请先导入歌词"
             }}
 
         duration = request.duration or max(valid_lyrics[-1].time + 3, 240)
@@ -1243,7 +1243,7 @@ async def generate_storyboard(request: StoryboardRequest):
         scenes = []
 
         for index, segment in enumerate(segments):
-            combined_text = "锛?.join(line.text for line in segment)
+            combined_text = "，".join(line.text for line in segment)
             short_text = combined_text[:90]
             start_time = segment[0].time
             last_line_time = segment[-1].time
@@ -1266,7 +1266,7 @@ async def generate_storyboard(request: StoryboardRequest):
 
             scenes.append({
                 "scene_index": index,
-                "title": f"鍒嗛暅{index + 1} 路 {arc['title']}",
+                "title": f"分镜{index + 1} · {arc['title']}",
                 "description": combined_text[:72] + ("..." if len(combined_text) > 72 else ""),
                 "prompt": prompt,
                 "start_time": start_time,
@@ -1283,7 +1283,7 @@ async def generate_storyboard(request: StoryboardRequest):
             "total_scenes": len(scenes),
             "valid_lyrics": len(valid_lyrics),
             "style": request.style,
-            "summary": f"宸叉寜娈佃惤鍒囧垎 {len(valid_lyrics)} 琛屾瓕璇嶏紝鐢熸垚 {len(scenes)} 涓垎闀滐紝骞冲潎姣忛暅 {average_lines} 琛屾瓕璇?,
+            "summary": f"已按段落切分 {len(valid_lyrics)} 行歌词，生成 {len(scenes)} 个分镜，平均每镜 {average_lines} 行歌词",
         }
 
         return {"scenes": scenes, "analysis": analysis}
@@ -1296,7 +1296,7 @@ async def generate_storyboard(request: StoryboardRequest):
             "total_scenes": 0,
             "valid_lyrics": 0,
             "style": request.style,
-            "summary": f"鐢熸垚鍑洪敊锛歿str(e)}"
+            "summary": f"生成出错：{str(e)}"
         }}
 
 
@@ -1312,7 +1312,7 @@ async def analyze_director(request: LyricScenesRequest):
     if not valid_lyrics:
         return {
             "director_analysis": {},
-            "summary": "娌℃湁鏈夋晥姝岃瘝锛岃鍏堝鍏ユ瓕璇?,
+            "summary": "没有有效歌词，请先导入歌词",
         }
 
     director_analysis = build_director_analysis(valid_lyrics, request.style, request.song_name or "")
@@ -1320,13 +1320,13 @@ async def analyze_director(request: LyricScenesRequest):
     scene_groups = build_smart_scene_groups(valid_lyrics, duration)
     return {
         "director_analysis": director_analysis,
-        "summary": f"宸插垎鏋?{len(valid_lyrics)} 琛屾湁鏁堟瓕璇嶏紝寤鸿鐢熸垚 {len(scene_groups)} 涓櫤鑳介暅澶?,
+        "summary": f"已分析 {len(valid_lyrics)} 行有效歌词，建议生成 {len(scene_groups)} 个智能镜头",
     }
 
 
 @app.post("/api/generate/smart-storyboard")
 async def generate_smart_storyboard(request: LyricScenesRequest):
-    """鍙敓鎴愬婕斿垎鏋愬拰鍒嗛暅缁撴瀯锛涙闃舵涓ョ璋冪敤鏀惰垂鍥剧墖鎺ュ彛銆?""
+    """只生成导演分析和分镜结构；此阶段严禁调用收费图片接口。"""
     try:
         valid_lyrics = [
             lyric.model_copy(update={"text": strip_trailing_speaker_label(lyric.text)})
@@ -1340,7 +1340,7 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
                 "total_scenes": 0,
                 "valid_lyrics": 0,
                 "style": request.style,
-                "summary": "娌℃湁鏈夋晥姝岃瘝锛岃鍏堝鍏ユ瓕璇?
+                "summary": "没有有效歌词，请先导入歌词"
             }}
 
         fallback_duration = max(valid_lyrics[-1].time + 4, 30)
@@ -1397,7 +1397,7 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
             fallback_characters = {}
             if request.visual_lock and request.visual_lock.enabled and request.visual_lock.main_subject:
                 fallback_characters["main"] = {
-                    "name": "涓昏",
+                    "name": "主角",
                     "description": request.visual_lock.main_subject,
                     "wardrobe": request.visual_lock.wardrobe or "",
                     "anchor_prompt": build_visual_lock_text(request.visual_lock),
@@ -1408,7 +1408,7 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
                     "stages": {
                         "default": {
                             "id": "default",
-                            "name": "榛樿闃舵",
+                            "name": "默认阶段",
                             "age_range": "",
                             "appearance": request.visual_lock.main_subject,
                             "hairstyle": "",
@@ -1472,15 +1472,15 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
         scenes = []
 
         for index, group in enumerate(scene_groups):
-            combined_text = "锛?.join(group.get("lyrics") or group.get("context_lyrics") or [])
+            combined_text = "，".join(group.get("lyrics") or group.get("context_lyrics") or [])
             start_time = float(group["start_time"])
             end_time = float(group["end_time"])
             arc = get_scene_arc(index, len(scene_groups))
             ai_scene = llm_scenes[index] if index < len(llm_scenes) else {}
             prompt = ai_scene.get("image_prompt") or (
-                f"{arc['mood']}锛寋arc['shot_type']}锛岃瘲鎰忕敾闈㈣〃鐜帮細{combined_text[:180]}銆?
-                f"鏁存洸瑙嗚鍦ｇ粡锛歿fallback_visual_bible_text}銆?
-                "閬垮厤琛€鑵ュ拰鎭愭€栫洿璇戯紝鏃犲瓧骞曪紝鏃犳枃瀛楋紝鏃?logo锛屾棤姘村嵃銆?
+                f"{arc['mood']}，{arc['shot_type']}，诗意画面表现：{combined_text[:180]}。"
+                f"整曲视觉圣经：{fallback_visual_bible_text}。"
+                "避免血腥和恐怖直译，无字幕，无文字，无 logo，无水印。"
             )
             video_prompt = ai_scene.get("video_prompt") or (
                 f"{arc['camera_motion']}, controlled 2D animation, subtle continuous motion, "
@@ -1496,7 +1496,7 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
 
             scenes.append({
                 "scene_index": index,
-                "title": f"闀滃ご {index + 1} 路 {arc['title']}",
+                "title": f"镜头 {index + 1} · {arc['title']}",
                 "description": combined_text,
                 "summary": ai_scene.get("summary") or combined_text[:80],
                 "mood": ai_scene.get("mood") or arc["mood"],
@@ -1548,9 +1548,9 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
             "director_analysis": director_analysis,
             "characters": director_analysis.get("characters", {}),
             "summary": (
-                f"宸茬敓鎴?{len(scenes)} 涓?6-10 绉掑叏浜戠鍊欓€夐暅澶达紝瑕嗙洊 {len(valid_lyrics)} 琛屾瓕璇嶏紱"
-                "灏氭湭璋冪敤浠讳綍鏀惰垂鍥剧墖鎴栬棰戞帴鍙?
-                + (f"锛汥eepSeek 涓嶅彲鐢ㄥ凡鍥為€€瑙勫垯鍒嗘瀽锛歿llm_error[:120]}" if llm_error else "")
+                f"已生成 {len(scenes)} 个 6-10 秒全云端候选镜头，覆盖 {len(valid_lyrics)} 行歌词；"
+                "尚未调用任何收费图片或视频接口"
+                + (f"；DeepSeek 不可用已回退规则分析：{llm_error[:120]}" if llm_error else "")
             ),
         }
 
@@ -1564,13 +1564,13 @@ async def generate_smart_storyboard(request: LyricScenesRequest):
             "total_scenes": 0,
             "valid_lyrics": 0,
             "style": request.style,
-            "summary": f"鐢熸垚鍑洪敊锛歿str(e)}"
+            "summary": f"生成出错：{str(e)}"
         }}
 
 
 @app.post("/api/generate/lyric-scenes")
 async def generate_lyric_scenes(request: LyricScenesRequest):
-    """閫愬彞鐢熸垚鍒嗛暅锛氭瘡鍙ユ湁鏁堟瓕璇嶅搴斾竴寮犵敾闈紝骞舵寜姝岃瘝鏃堕棿鎴冲榻愩€?""
+    """逐句生成分镜：每句有效歌词对应一张画面，并按歌词时间戳对齐。"""
     try:
         valid_lyrics = [
             lyric.model_copy(update={"text": strip_trailing_speaker_label(lyric.text)})
@@ -1584,7 +1584,7 @@ async def generate_lyric_scenes(request: LyricScenesRequest):
                 "total_scenes": 0,
                 "valid_lyrics": 0,
                 "style": request.style,
-                "summary": "娌℃湁鏈夋晥姝岃瘝锛岃鍏堝鍏ユ瓕璇?
+                "summary": "没有有效歌词，请先导入歌词"
             }}
 
         fallback_duration = max(valid_lyrics[-1].time + 4, 30)
@@ -1599,7 +1599,7 @@ async def generate_lyric_scenes(request: LyricScenesRequest):
         scenes = []
 
         for index, group in enumerate(visual_groups):
-            combined_text = "锛?.join(line.text.strip() for line in group if line.text.strip())
+            combined_text = "，".join(line.text.strip() for line in group if line.text.strip())
             previous_text = visual_groups[index - 1][-1].text if index > 0 else ""
             next_text = visual_groups[index + 1][0].text if index < len(visual_groups) - 1 else ""
             start_time = 0.0 if index == 0 else group[0].time
@@ -1627,7 +1627,7 @@ async def generate_lyric_scenes(request: LyricScenesRequest):
 
             scenes.append({
                 "scene_index": index,
-                "title": f"姝岃瘝鐢婚潰 {index + 1}",
+                "title": f"歌词画面 {index + 1}",
                 "description": combined_text,
                 "prompt": prompt,
                 "start_time": start_time,
@@ -1641,10 +1641,10 @@ async def generate_lyric_scenes(request: LyricScenesRequest):
             "valid_lyrics": len(valid_lyrics),
             "style": request.style,
             "summary": (
-                f"宸插悎骞剁煭鍙ュ苟浣跨敤 AI 鐢熸垚 {generated_count}/{len(visual_groups)} 寮犺繛璐敾闈紝瑕嗙洊 {len(valid_lyrics)} 琛屾瓕璇?
-                + (f"锛寋failed_count} 寮犲け璐ュ悗浣跨敤鍗犱綅鍥? if failed_count else "")
+                f"已合并短句并使用 AI 生成 {generated_count}/{len(visual_groups)} 张连贯画面，覆盖 {len(valid_lyrics)} 行歌词"
+                + (f"，{failed_count} 张失败后使用占位图" if failed_count else "")
                 if using_ai_images
-                else f"宸插悎骞剁煭鍙ヤ负 {len(visual_groups)} 涓敾闈㈢粍锛岃鐩?{len(valid_lyrics)} 琛屾瓕璇嶏紱褰撳墠浣跨敤鍗犱綅鍥炬ā寮?
+                else f"已合并短句为 {len(visual_groups)} 个画面组，覆盖 {len(valid_lyrics)} 行歌词；当前使用占位图模式"
             ),
         }
 
@@ -1658,7 +1658,7 @@ async def generate_lyric_scenes(request: LyricScenesRequest):
             "total_scenes": 0,
             "valid_lyrics": 0,
             "style": request.style,
-            "summary": f"鐢熸垚鍑洪敊锛歿str(e)}"
+            "summary": f"生成出错：{str(e)}"
         }}
 
 
@@ -1681,7 +1681,7 @@ async def generate_batch(request: BatchGenerateRequest):
     image_provider = get_image_provider_config(request.image_provider)
 
     for index, group in enumerate(visual_groups):
-        combined_text = "锛?.join(line.text.strip() for line in group if line.text.strip())
+        combined_text = "，".join(line.text.strip() for line in group if line.text.strip())
         prompt = build_lyric_group_scene_prompt(
             current_text=combined_text,
             style=request.style,
@@ -1800,7 +1800,7 @@ async def generate_image(request: GenerateImageRequest):
                 request.reference_images,
             )
             if not image_url:
-                raise RuntimeError(f"{provider_config.provider} 鏈繑鍥炲浘鐗?)
+                raise RuntimeError(f"{provider_config.provider} 未返回图片")
         return {
             "image_url": image_url,
             "scene_index": request.scene_index,
@@ -1809,7 +1809,7 @@ async def generate_image(request: GenerateImageRequest):
         }
     except Exception as e:
         print(f"[ERROR] generate_image: {e}")
-        raise HTTPException(status_code=502, detail=f"鍥剧墖鐢熸垚澶辫触锛歿e}") from e
+        raise HTTPException(status_code=502, detail=f"图片生成失败：{e}") from e
 
 
 def get_runway_model(model: str) -> str:
@@ -1857,7 +1857,7 @@ def is_valid_kling_api_key(token: str) -> bool:
 def kling_credential_error() -> HTTPException:
     return HTTPException(
         status_code=400,
-        detail="Kling API Key 鏍煎紡閿欒锛氬繀椤讳互 api-key-kling- 寮€澶达紝璇蜂粠 Kling 寮€鏀惧钩鍙伴噸鏂板鍒?,
+        detail="Kling API Key 格式错误：必须以 api-key-kling- 开头，请从 Kling 开放平台重新复制",
     )
 
 
@@ -1875,12 +1875,12 @@ def get_kling_auth_token(provider_config: VideoProviderConfig) -> str:
             return env_token
         raise kling_credential_error()
 
-    raise HTTPException(status_code=400, detail="Kling 闇€瑕佸～鍐欎互 api-key-kling- 寮€澶寸殑鏂扮増 API Key")
+    raise HTTPException(status_code=400, detail="Kling 需要填写以 api-key-kling- 开头的新版 API Key")
 
 
 def kling_response_body(response: httpx.Response) -> str:
     body = (response.text or "").strip().replace("\r", " ").replace("\n", " ")
-    return body[:400] or "绌哄搷搴?
+    return body[:400] or "空响应"
 
 
 def parse_kling_response(response: httpx.Response, action: str) -> dict:
@@ -1889,19 +1889,19 @@ def parse_kling_response(response: httpx.Response, action: str) -> dict:
     except (ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Kling {action}杩斿洖浜嗘棤娉曡В鏋愮殑鍝嶅簲锛圚TTP {response.status_code}锛夛細{kling_response_body(response)}",
+            detail=f"Kling {action}返回了无法解析的响应（HTTP {response.status_code}）：{kling_response_body(response)}",
         ) from exc
 
     if not isinstance(data, dict):
-        raise HTTPException(status_code=502, detail=f"Kling {action}杩斿洖鏍煎紡寮傚父锛氬簲涓?JSON 瀵硅薄")
+        raise HTTPException(status_code=502, detail=f"Kling {action}返回格式异常：应为 JSON 对象")
 
     code = data.get("code")
     if code not in (None, 0, "0"):
-        provider_message = str(data.get("message") or data.get("msg") or "鏈煡閿欒")[:300]
+        provider_message = str(data.get("message") or data.get("msg") or "未知错误")[:300]
         if str(code) == "1002":
-            detail = "Kling API Key 鏃犳晥鎴栧凡鎾ら攢锛岃鍦ㄥ紑鏀惧钩鍙伴噸鏂扮敓鎴愬苟纭 API 濂楅宸插惎鐢?
+            detail = "Kling API Key 无效或已撤销，请在开放平台重新生成并确认 API 套餐已启用"
         else:
-            detail = f"Kling {action}澶辫触锛堥敊璇爜 {code}锛夛細{provider_message}"
+            detail = f"Kling {action}失败（错误码 {code}）：{provider_message}"
         raise HTTPException(status_code=502, detail=detail)
     return data
 
@@ -1911,13 +1911,13 @@ def kling_http_error_detail(response: httpx.Response, action: str) -> str:
         parse_kling_response(response, action)
     except HTTPException as exc:
         return str(exc.detail)
-    return f"Kling {action}澶辫触锛圚TTP {response.status_code}锛夛細{kling_response_body(response)}"
+    return f"Kling {action}失败（HTTP {response.status_code}）：{kling_response_body(response)}"
 
 
 def extract_kling_task_data(response_data: dict, action: str) -> dict:
     task_data = response_data.get("data", response_data)
     if not isinstance(task_data, dict):
-        raise HTTPException(status_code=502, detail=f"Kling {action}杩斿洖鏍煎紡寮傚父锛氱己灏戜换鍔″璞?)
+        raise HTTPException(status_code=502, detail=f"Kling {action}返回格式异常：缺少任务对象")
     return task_data
 
 
@@ -1948,7 +1948,7 @@ async def get_kling_image_source(image_url: str) -> str:
 async def generate_runway_video(request: GenerateVideoRequest, provider_config: VideoProviderConfig, duration: float):
     api_key = (provider_config.api_key or "").strip() or os.getenv("RUNWAY_API_KEY", "")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Runway 闇€瑕?API key")
+        raise HTTPException(status_code=400, detail="Runway 需要 API key")
 
     cache_key = stable_file_stem(
         f"runway-{request.scene_index}-{request.image_url}-{request.last_frame_url}-{request.prompt}-"
@@ -2003,11 +2003,11 @@ async def generate_runway_video(request: GenerateVideoRequest, provider_config: 
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
                     status_code=exc.response.status_code,
-                    detail=f"Runway 鍒涘缓浠诲姟澶辫触锛歿exc.response.text[:400]}",
+                    detail=f"Runway 创建任务失败：{exc.response.text[:400]}",
                 ) from exc
             task_id = str(task_data.get("id") or "")
             if not task_id:
-                raise HTTPException(status_code=502, detail="Runway 鏈繑鍥炰换鍔?id")
+                raise HTTPException(status_code=502, detail="Runway 未返回任务 id")
             await save_video_task(cache_key, {
                 "provider": "runway", "task_id": task_id, "status": "pending", "scene_index": request.scene_index
             })
@@ -2016,7 +2016,7 @@ async def generate_runway_video(request: GenerateVideoRequest, provider_config: 
             if status in {"SUCCEEDED", "SUCCESS", "COMPLETED"}:
                 output = task_data.get("output")
                 if not isinstance(output, list) or not output:
-                    raise HTTPException(status_code=502, detail="Runway 浠诲姟鎴愬姛浣嗘湭杩斿洖 output")
+                    raise HTTPException(status_code=502, detail="Runway 任务成功但未返回 output")
                 video_url = output[0]
                 local_video_url = await download_video_to_cache(video_url, file_path)
                 await save_video_task(cache_key, {"status": "done", "local_video_url": local_video_url})
@@ -2033,7 +2033,7 @@ async def generate_runway_video(request: GenerateVideoRequest, provider_config: 
             if status in {"FAILED", "CANCELLED", "CANCELED"}:
                 failure = task_data.get("failure") or task_data.get("error") or task_data
                 await save_video_task(cache_key, {"status": "failed", "error": str(failure)[:1000]})
-                raise HTTPException(status_code=502, detail=f"Runway 浠诲姟澶辫触锛歿failure}")
+                raise HTTPException(status_code=502, detail=f"Runway 任务失败：{failure}")
 
             await asyncio.sleep(5)
             try:
@@ -2043,23 +2043,23 @@ async def generate_runway_video(request: GenerateVideoRequest, provider_config: 
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
                     status_code=exc.response.status_code,
-                    detail=f"Runway 鏌ヨ浠诲姟澶辫触锛歿exc.response.text[:400]}",
+                    detail=f"Runway 查询任务失败：{exc.response.text[:400]}",
                 ) from exc
 
-    raise HTTPException(status_code=504, detail="Runway 浠诲姟绛夊緟瓒呮椂锛岃绋嶅悗閲嶈瘯")
+    raise HTTPException(status_code=504, detail="Runway 任务等待超时，请稍后重试")
 
 
 async def generate_luma_video(request: GenerateVideoRequest, provider_config: VideoProviderConfig, duration: float):
     api_key = (provider_config.api_key or "").strip() or os.getenv("LUMA_API_KEY", "")
     if not api_key:
-        raise HTTPException(status_code=400, detail="Luma 闇€瑕?API key")
+        raise HTTPException(status_code=400, detail="Luma 需要 API key")
 
     prompt_image_url = get_luma_public_image_url(request.image_url)
 
     if not is_public_https_url(prompt_image_url):
         raise HTTPException(
             status_code=400,
-            detail="Luma 鍥剧敓瑙嗛闇€瑕佸缃戝彲璁块棶鐨?HTTPS 鍥剧墖 URL锛涘彲璁剧疆 PUBLIC_BACKEND_BASE_URL 涓?Cloudflare Tunnel/ngrok 鍦板潃",
+            detail="Luma 图生视频需要外网可访问的 HTTPS 图片 URL；可设置 PUBLIC_BACKEND_BASE_URL 为 Cloudflare Tunnel/ngrok 地址",
         )
 
     cache_key = stable_file_stem(
@@ -2122,11 +2122,11 @@ async def generate_luma_video(request: GenerateVideoRequest, provider_config: Vi
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
                     status_code=exc.response.status_code,
-                    detail=f"Luma 鍒涘缓浠诲姟澶辫触锛歿exc.response.text[:400]}",
+                    detail=f"Luma 创建任务失败：{exc.response.text[:400]}",
                 ) from exc
             generation_id = str(generation_data.get("id") or "")
             if not generation_id:
-                raise HTTPException(status_code=502, detail="Luma 鏈繑鍥?generation id")
+                raise HTTPException(status_code=502, detail="Luma 未返回 generation id")
             await save_video_task(cache_key, {
                 "provider": "luma", "task_id": generation_id, "status": "pending", "scene_index": request.scene_index
             })
@@ -2137,7 +2137,7 @@ async def generate_luma_video(request: GenerateVideoRequest, provider_config: Vi
                 assets = generation_data.get("assets") or {}
                 video_url = assets.get("video") if isinstance(assets, dict) else None
                 if not video_url:
-                    raise HTTPException(status_code=502, detail="Luma 浠诲姟鎴愬姛浣嗘湭杩斿洖 assets.video")
+                    raise HTTPException(status_code=502, detail="Luma 任务成功但未返回 assets.video")
                 local_video_url = await download_video_to_cache(video_url, file_path)
                 await save_video_task(cache_key, {"status": "done", "local_video_url": local_video_url})
                 return completed_video_payload(
@@ -2153,7 +2153,7 @@ async def generate_luma_video(request: GenerateVideoRequest, provider_config: Vi
             if state in {"failed", "failure", "canceled", "cancelled"}:
                 failure = generation_data.get("failure_reason") or generation_data.get("error") or generation_data
                 await save_video_task(cache_key, {"status": "failed", "error": str(failure)[:1000]})
-                raise HTTPException(status_code=502, detail=f"Luma 浠诲姟澶辫触锛歿failure}")
+                raise HTTPException(status_code=502, detail=f"Luma 任务失败：{failure}")
 
             await asyncio.sleep(5)
             try:
@@ -2163,10 +2163,10 @@ async def generate_luma_video(request: GenerateVideoRequest, provider_config: Vi
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
                     status_code=exc.response.status_code,
-                    detail=f"Luma 鏌ヨ浠诲姟澶辫触锛歿exc.response.text[:400]}",
+                    detail=f"Luma 查询任务失败：{exc.response.text[:400]}",
                 ) from exc
 
-    raise HTTPException(status_code=504, detail="Luma 浠诲姟绛夊緟瓒呮椂锛岃绋嶅悗閲嶈瘯")
+    raise HTTPException(status_code=504, detail="Luma 任务等待超时，请稍后重试")
 
 
 async def generate_kling_video(request: GenerateVideoRequest, provider_config: VideoProviderConfig, duration: float):
@@ -2201,7 +2201,7 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Kling 鍏抽敭甯ц鍙栧け璐ワ細{exc}") from exc
+        raise HTTPException(status_code=400, detail=f"Kling 关键帧读取失败：{exc}") from exc
 
     payload = {
         "model_name": get_kling_model(provider_config.model),
@@ -2228,12 +2228,12 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
                     status_code=502,
-                    detail=kling_http_error_detail(exc.response, "鏌ヨ浠诲姟"),
+                    detail=kling_http_error_detail(exc.response, "查询任务"),
                 ) from exc
             except httpx.RequestError as exc:
-                raise HTTPException(status_code=502, detail=f"鏃犳硶杩炴帴 Kling 鏌ヨ浠诲姟锛歿exc}") from exc
-            query_data = parse_kling_response(task_response, "鏌ヨ浠诲姟")
-            task_data = extract_kling_task_data(query_data, "鏌ヨ浠诲姟")
+                raise HTTPException(status_code=502, detail=f"无法连接 Kling 查询任务：{exc}") from exc
+            query_data = parse_kling_response(task_response, "查询任务")
+            task_data = extract_kling_task_data(query_data, "查询任务")
         else:
             try:
                 create_response = await client.post(f"{base_url}/videos/image2video", json=payload, headers=headers)
@@ -2241,16 +2241,16 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
                     status_code=502,
-                    detail=kling_http_error_detail(exc.response, "鍒涘缓浠诲姟"),
+                    detail=kling_http_error_detail(exc.response, "创建任务"),
                 ) from exc
             except httpx.RequestError as exc:
-                raise HTTPException(status_code=502, detail=f"鏃犳硶杩炴帴 Kling 鍒涘缓浠诲姟锛歿exc}") from exc
-            create_data = parse_kling_response(create_response, "鍒涘缓浠诲姟")
-            data = extract_kling_task_data(create_data, "鍒涘缓浠诲姟")
+                raise HTTPException(status_code=502, detail=f"无法连接 Kling 创建任务：{exc}") from exc
+            create_data = parse_kling_response(create_response, "创建任务")
+            data = extract_kling_task_data(create_data, "创建任务")
             task_id_value = data.get("task_id")
             task_id = str(task_id_value or "")
             if not task_id:
-                raise HTTPException(status_code=502, detail="Kling 鍒涘缓浠诲姟鍝嶅簲涓己灏?task_id锛屼换鍔℃湭琚褰曪紝璇峰嬁杩炵画閲嶈瘯")
+                raise HTTPException(status_code=502, detail="Kling 创建任务响应中缺少 task_id，任务未被记录，请勿连续重试")
             task_data = data
             await save_video_task(cache_key, {
                 "provider": "kling", "task_id": task_id, "status": "pending", "scene_index": request.scene_index
@@ -2264,18 +2264,18 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
                 if not video_url:
                     video_url = task_data.get("video_url") or task_data.get("url")
                 if not video_url:
-                    raise HTTPException(status_code=502, detail="Kling 浠诲姟鎴愬姛浣嗘湭杩斿洖瑙嗛 URL")
+                    raise HTTPException(status_code=502, detail="Kling 任务成功但未返回视频 URL")
                 try:
                     local_video_url = await download_video_to_cache(video_url, file_path)
                 except httpx.HTTPStatusError as exc:
                     raise HTTPException(
                         status_code=502,
-                        detail=f"Kling 瑙嗛涓嬭浇澶辫触锛圚TTP {exc.response.status_code}锛?,
+                        detail=f"Kling 视频下载失败（HTTP {exc.response.status_code}）",
                     ) from exc
                 except httpx.RequestError as exc:
-                    raise HTTPException(status_code=502, detail=f"鏃犳硶杩炴帴 Kling 涓嬭浇鐢熸垚瑙嗛锛歿exc}") from exc
+                    raise HTTPException(status_code=502, detail=f"无法连接 Kling 下载生成视频：{exc}") from exc
                 except Exception as exc:
-                    raise HTTPException(status_code=502, detail=f"Kling 瑙嗛淇濆瓨澶辫触锛歿exc}") from exc
+                    raise HTTPException(status_code=502, detail=f"Kling 视频保存失败：{exc}") from exc
                 await save_video_task(cache_key, {"status": "done", "local_video_url": local_video_url})
                 return completed_video_payload(
                     video_url=local_video_url,
@@ -2290,7 +2290,7 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
             if status in {"failed", "failure", "canceled", "cancelled"}:
                 reason = task_data.get("task_status_msg") or task_data.get("error") or task_data
                 await save_video_task(cache_key, {"status": "failed", "error": str(reason)[:1000]})
-                raise HTTPException(status_code=502, detail=f"Kling 浠诲姟澶辫触锛歿reason}")
+                raise HTTPException(status_code=502, detail=f"Kling 任务失败：{reason}")
 
             await asyncio.sleep(5)
             try:
@@ -2299,16 +2299,16 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
                     status_code=502,
-                    detail=kling_http_error_detail(exc.response, "鏌ヨ浠诲姟"),
+                    detail=kling_http_error_detail(exc.response, "查询任务"),
                 ) from exc
             except httpx.RequestError as exc:
-                raise HTTPException(status_code=502, detail=f"鏃犳硶杩炴帴 Kling 鏌ヨ浠诲姟锛歿exc}") from exc
+                raise HTTPException(status_code=502, detail=f"无法连接 Kling 查询任务：{exc}") from exc
 
-            query_data = parse_kling_response(task_response, "鏌ヨ浠诲姟")
+            query_data = parse_kling_response(task_response, "查询任务")
 
-            task_data = extract_kling_task_data(query_data, "鏌ヨ浠诲姟")
+            task_data = extract_kling_task_data(query_data, "查询任务")
 
-    raise HTTPException(status_code=504, detail="Kling 浠诲姟绛夊緟瓒呮椂锛岃绋嶅悗閲嶈瘯")
+    raise HTTPException(status_code=504, detail="Kling 任务等待超时，请稍后重试")
 
 
 @app.post("/api/generate/video")
@@ -2318,7 +2318,7 @@ async def generate_video(request: GenerateVideoRequest):
     duration = max(0.5, float(request.duration or provider_config.clip_seconds or 6.0))
 
     if provider == "none":
-        raise HTTPException(status_code=400, detail="褰撳墠宸插叧闂棰戞ā鍨?)
+        raise HTTPException(status_code=400, detail="当前已关闭视频模型")
 
     if provider == "local_motion":
         return {
@@ -2326,12 +2326,12 @@ async def generate_video(request: GenerateVideoRequest):
             "scene_index": request.scene_index,
             "provider": provider,
             "status": "ready_for_export",
-            "message": "鏈湴鍔ㄦ€佺墖娈典細鍦ㄥ鍑烘椂鐢?ffmpeg 鏍规嵁鍏抽敭甯у拰闀滃ご杩愬姩鐢熸垚",
+            "message": "本地动态片段会在导出时由 ffmpeg 根据关键帧和镜头运动生成",
         }
 
     if provider == "custom":
         if not provider_config.base_url:
-            raise HTTPException(status_code=400, detail="鑷畾涔夎棰戞ā鍨嬮渶瑕佸～鍐?Base URL")
+            raise HTTPException(status_code=400, detail="自定义视频模型需要填写 Base URL")
 
         cache_key = stable_file_stem(
             f"custom-{request.scene_index}-{request.image_url}-{request.last_frame_url}-{request.prompt}-"
@@ -2377,10 +2377,10 @@ async def generate_video(request: GenerateVideoRequest):
         except httpx.HTTPStatusError as exc:
             raise HTTPException(
                 status_code=exc.response.status_code,
-                detail=f"鑷畾涔夎棰戞ā鍨嬭姹傚け璐ワ細{exc.response.text[:300]}",
+                detail=f"自定义视频模型请求失败：{exc.response.text[:300]}",
             ) from exc
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"鑷畾涔夎棰戞ā鍨嬩笉鍙敤锛歿exc}") from exc
+            raise HTTPException(status_code=502, detail=f"自定义视频模型不可用：{exc}") from exc
 
         video_url = (
             data.get("video_url")
@@ -2391,7 +2391,7 @@ async def generate_video(request: GenerateVideoRequest):
             else None
         )
         if not video_url:
-            raise HTTPException(status_code=502, detail="鑷畾涔夎棰戞ā鍨嬫湭杩斿洖 video_url")
+            raise HTTPException(status_code=502, detail="自定义视频模型未返回 video_url")
         task_id = str(data.get("task_id") or data.get("id") or "") if isinstance(data, dict) else ""
         local_video_url = await download_video_to_cache(str(video_url), file_path)
         await save_video_task(cache_key, {
@@ -2422,7 +2422,7 @@ async def generate_video(request: GenerateVideoRequest):
     if provider == "kling":
         return await generate_kling_video(request, provider_config, duration)
 
-    raise HTTPException(status_code=400, detail=f"鏈煡瑙嗛鎻愪緵鍟嗭細{provider_config.provider}")
+    raise HTTPException(status_code=400, detail=f"未知视频提供商：{provider_config.provider}")
 
 
 if __name__ == "__main__":

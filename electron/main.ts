@@ -442,7 +442,7 @@ async function materializeSceneVideo(source: string, tempDir: string, index: num
   if (source.startsWith('data:')) {
     const base64Payload = source.split(',')[1]
     if (!base64Payload) {
-      throw new Error('瑙嗛鐗囨鏁版嵁鏃犳晥')
+      throw new Error('视频片段数据无效')
     }
     await fs.writeFile(targetPath, Buffer.from(base64Payload, 'base64'))
     return targetPath
@@ -459,7 +459,7 @@ async function materializeSceneVideo(source: string, tempDir: string, index: num
     return targetPath
   }
 
-  throw new Error(`鏆備笉鏀寔鐨勮棰戠墖娈垫潵婧愶細${source}`)
+  throw new Error(`暂不支持的视频片段来源：${source}`)
 }
 
 async function createConcatListFile(tempDir: string, scenes: ExportScene[], imagePaths: string[]) {
@@ -840,7 +840,7 @@ async function createMixedSceneVideoClips(
     sendExportProgress({
       stage: 'render',
       progress: Math.min(79, 8 + Math.round(((index + 1) / scenes.length) * 71)),
-      message: `姝ｅ湪鍑嗗瑙嗛鐗囨 ${index + 1}/${scenes.length}`,
+      message: `正在准备视频片段 ${index + 1}/${scenes.length}`,
     })
   }
 
@@ -1078,7 +1078,7 @@ async function exportVideo(request: ExportRequest) {
       )
       const clipConcatFilePath = await createVideoConcatListFile(tempDir, transitionedClipPaths)
 
-      sendExportProgress({ stage: 'render', progress: 80, message: '姝ｅ湪鎷兼帴瑙嗛鐗囨骞跺悎鎴愰煶棰?..' })
+      sendExportProgress({ stage: 'render', progress: 80, message: '正在拼接视频片段并合成音频...' })
 
       await runFfmpegWithSubtitleFallback(
         resolvedFfmpegPath,
@@ -1086,7 +1086,7 @@ async function exportVideo(request: ExportRequest) {
         (subtitlePath) => createConcatVideoWithAudioArgs(clipConcatFilePath, request.audioPath, request.outputPath, subtitlePath),
         (line) => {
           if (line === 'progress=end') {
-            sendExportProgress({ stage: 'complete', progress: 100, message: '瑙嗛瀵煎嚭瀹屾垚' })
+            sendExportProgress({ stage: 'complete', progress: 100, message: '视频导出完成' })
           }
         }
       )
