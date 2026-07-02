@@ -709,6 +709,16 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
   const imageAssets = projectAssets.filter((asset) => asset.type === 'image')
   const videoAssets = projectAssets.filter((asset) => asset.type === 'video')
   const promptAssets = projectAssets.filter((asset) => asset.prompt || asset.videoPrompt)
+  const testSceneIndexes = project.generationPolicy.test_scene_indexes ?? []
+  const testSceneIndexSet = new Set(testSceneIndexes)
+  const testScenes = project.scenes.filter((scene) => testSceneIndexSet.has(scene.scene_index))
+  const areTestScenesReady = testSceneIndexes.length > 0
+    && testScenes.length === testSceneIndexes.length
+    && testScenes.every(
+      (scene) => scene.video_status === 'done'
+        && Boolean(scene.video_url)
+        && scene.quality_status !== 'rejected'
+    )
 
   const recordSceneAsset = (
     scene: Scene,
@@ -1767,6 +1777,63 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
     }
   }
 
+  const openTestApprovalModal = (
+    sceneIndexes: number[] = project.generationPolicy.test_scene_indexes,
+    sourceScenes: Scene[] = project.scenes
+  ) => {
+    const uniqueIndexes = Array.from(new Set(sceneIndexes))
+    if (uniqueIndexes.length === 0) {
+      message.warning('请先生成三镜测试')
+      return
+    }
+
+    const indexSet = new Set(uniqueIndexes)
+    const scenesToReview = sourceScenes.filter((scene) => indexSet.has(scene.scene_index))
+    const failedScenes = scenesToReview.filter((scene) => scene.quality_status === 'rejected')
+    const incompleteScenes = scenesToReview.filter(
+      (scene) => scene.video_status !== 'done' || !scene.video_url
+    )
+
+    if (scenesToReview.length !== uniqueIndexes.length || incompleteScenes.length > 0) {
+      message.warning('三镜测试尚未全部生成完成，请等待完成或重试失败视频')
+      return
+    }
+    if (failedScenes.length > 0) {
+      message.warning('三镜测试中有质检失败的视频，请先重试失败视频')
+      return
+    }
+
+    Modal.confirm({
+      title: '确认三镜测试',
+      content: '请确认你已依次点击三个测试镜头并在右侧完整播放，人物近景、全身动作、环境镜头、画风和关键道具均可接受。确认后将锁定当前图片模型、视频模型和视觉圣经。',
+      okText: '测试通过并锁定',
+      cancelText: '继续检查',
+      onOk: () => {
+        setScenes(
+          sourceScenes.map((scene) => indexSet.has(scene.scene_index)
+            ? { ...scene, quality_status: 'approved' as const, quality_errors: [] }
+            : scene
+          ),
+          project.analysis
+        )
+        setProject({
+          generationPolicy: {
+            ...project.generationPolicy,
+            test_scene_indexes: uniqueIndexes,
+            test_approved: true,
+            provider_locked: true,
+            image_provider: imageSettings.provider,
+            image_model: imageSettings.model,
+            video_provider: videoSettings.provider,
+            video_model: videoSettings.model,
+            style_fingerprint: project.visualBible?.fingerprint || project.analysis?.visual_bible?.fingerprint || '',
+          },
+        })
+        message.success('三镜测试已确认并锁定，可以生成全部云端镜头')
+      },
+    })
+  }
+
   const runVideoQueue = async (
     mode: 'all' | 'failed' = 'all',
     explicitIndexes?: number[],
@@ -1817,8 +1884,13 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       return
     }
 
+    const requestedTestIndexes = isTestBatch
+      ? Array.from(new Set(explicitIndexes ?? getTestSceneIndexes(project.scenes)))
+      : []
+    const explicitIndexSet = explicitIndexes ? new Set(explicitIndexes) : null
     const targetIndexes = new Set(
-      explicitIndexes ?? project.scenes
+      project.scenes
+        .filter((scene) => !explicitIndexSet || explicitIndexSet.has(scene.scene_index))
         .filter((scene) => {
           if (mode === 'failed') return scene.video_status === 'error' || scene.quality_status === 'rejected'
           return !(
@@ -1832,7 +1904,11 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
     )
 
     if (targetIndexes.size === 0) {
-      message.info(mode === 'failed' ? '没有失败的视频片段需要重试' : '没有可生成的视频片段')
+      if (isTestBatch) {
+        openTestApprovalModal(requestedTestIndexes)
+      } else {
+        message.info(mode === 'failed' ? '没有失败的视频片段需要重试' : '没有可生成的视频片段')
+      }
       return
     }
 
@@ -1860,7 +1936,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
     setProject({
       generationPolicy: {
         ...policy,
-        test_scene_indexes: isTestBatch ? Array.from(targetIndexes) : policy.test_scene_indexes,
+        test_scene_indexes: isTestBatch ? requestedTestIndexes : policy.test_scene_indexes,
         provider_locked: true,
         image_provider: imageSettings.provider,
         image_model: imageSettings.model,
@@ -2049,27 +2125,13 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
     } else if (failedCount > 0) {
       message.warning({ content: `视频队列完成，${failedCount} 个镜头失败，可重试失败项`, key: 'video-queue' })
     } else if (isTestBatch) {
-      Modal.confirm({
-        title: '三镜测试已生成',
-        content: '请检查人物近景、全身动作和环境镜头。确认后将锁定当前图片模型、视频模型和视觉圣经。',
-        okText: '测试通过并锁定',
-        cancelText: '暂不通过',
-        onOk: () => {
-          setProject({
-            generationPolicy: {
-              ...project.generationPolicy,
-              test_scene_indexes: Array.from(targetIndexes),
-              test_approved: true,
-              provider_locked: true,
-              image_provider: imageSettings.provider,
-              image_model: imageSettings.model,
-              video_provider: videoSettings.provider,
-              video_model: videoSettings.model,
-              style_fingerprint: styleFingerprint,
-            },
-          })
-          message.success('测试已确认，可以生成全部云端镜头')
-        },
+      const firstTestScene = nextScenes.find((scene) => requestedTestIndexes.includes(scene.scene_index))
+      if (firstTestScene) {
+        onSceneSelect(firstTestScene)
+      }
+      message.success({
+        content: '三镜视频已就绪，请逐个播放检查后点击“确认三镜测试”',
+        key: 'video-queue',
       })
     } else {
       message.success({ content: '视频队列已完成', key: 'video-queue' })
@@ -2286,10 +2348,30 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
             || isImageQueueRunning
             || isVideoQueueRunning
             || project.generationPolicy.test_approved
+            || areTestScenesReady
           }
           style={{ borderRadius: 6, fontSize: 12 }}
         >
-          {project.generationPolicy.test_approved ? '三镜测试已通过' : '生成三镜测试'}
+          {project.generationPolicy.test_approved
+            ? '三镜测试已通过'
+            : areTestScenesReady
+              ? '三镜视频已就绪'
+              : '生成三镜测试'}
+        </Button>
+        <Button
+          size="small"
+          icon={<CheckOutlined />}
+          onClick={() => openTestApprovalModal()}
+          disabled={
+            project.generationPolicy.test_approved
+            || !areTestScenesReady
+            || isGenerating
+            || isImageQueueRunning
+            || isVideoQueueRunning
+          }
+          style={{ borderRadius: 6, fontSize: 12 }}
+        >
+          {project.generationPolicy.test_approved ? '三镜测试已确认' : '确认三镜测试'}
         </Button>
         <Button
           size="small"
