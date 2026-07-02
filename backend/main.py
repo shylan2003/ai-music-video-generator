@@ -1115,6 +1115,20 @@ class GenerateImageRequest(BaseModel):
     visual_lock: Optional[VisualLockConfig] = None
 
 
+class CachedSceneImageRequest(BaseModel):
+    scene_index: int
+    prompt: str
+    character_id: Optional[str] = ""
+    anchor_image: Optional[str] = ""
+    reference_images: List[str] = Field(default_factory=list)
+
+
+class RestoreImageCacheRequest(BaseModel):
+    scenes: List[CachedSceneImageRequest]
+    visual_lock: Optional[VisualLockConfig] = None
+    allow_ordered_fallback: bool = True
+
+
 class LyricsParseRequest(BaseModel):
     content: str
     kind: str = "auto"
@@ -1696,17 +1710,87 @@ async def generate_batch(request: BatchGenerateRequest):
     return {"results": results}
 
 
+def build_single_image_cache_key(request: GenerateImageRequest | CachedSceneImageRequest, visual_lock: Optional[VisualLockConfig] = None) -> tuple[str, str]:
+    request_visual_lock = request.visual_lock if isinstance(request, GenerateImageRequest) else visual_lock
+    prompt = append_visual_lock_to_prompt(request.prompt, request_visual_lock)
+    lyric_id = request.lyric_id if isinstance(request, GenerateImageRequest) else ""
+    cache_key = (
+        f"single-{request.scene_index}-{lyric_id or ''}-"
+        f"{request.character_id or ''}-{request.anchor_image or ''}-"
+        f"{'|'.join(request.reference_images)}-{prompt}"
+    )
+    return prompt, cache_key
+
+
+def list_cached_image_files() -> list[Path]:
+    allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
+    try:
+        files = [
+            path for path in GENERATED_DIR.iterdir()
+            if path.is_file() and path.suffix.lower() in allowed_suffixes and path.stat().st_size > 0
+        ]
+    except OSError:
+        return []
+    return sorted(files, key=lambda path: (path.stat().st_mtime_ns, path.name.lower()))
+
+
+@app.post("/api/images/cache/restore")
+async def restore_image_cache(request: RestoreImageCacheRequest):
+    cached_files = list_cached_image_files()
+    cached_by_stem = {path.stem: path for path in cached_files}
+    recovered: list[dict] = []
+    unmatched: list[CachedSceneImageRequest] = []
+    used_paths: set[Path] = set()
+
+    for scene in sorted(request.scenes, key=lambda item: item.scene_index):
+        _prompt, cache_key = build_single_image_cache_key(scene, request.visual_lock)
+        matched_path = cached_by_stem.get(stable_file_stem(cache_key))
+        if matched_path and matched_path not in used_paths:
+            recovered.append({
+                "scene_index": scene.scene_index,
+                "image_url": get_public_image_url(matched_path),
+                "file_name": matched_path.name,
+                "match_mode": "exact",
+            })
+            used_paths.add(matched_path)
+        else:
+            unmatched.append(scene)
+
+    ordered_fallback_used = False
+    remaining_files = [path for path in cached_files if path not in used_paths]
+    if (
+        request.allow_ordered_fallback
+        and unmatched
+        and len(cached_files) == len(request.scenes)
+        and len(remaining_files) == len(unmatched)
+    ):
+        ordered_fallback_used = True
+        for scene, matched_path in zip(sorted(unmatched, key=lambda item: item.scene_index), remaining_files):
+            recovered.append({
+                "scene_index": scene.scene_index,
+                "image_url": get_public_image_url(matched_path),
+                "file_name": matched_path.name,
+                "match_mode": "ordered_fallback",
+            })
+        unmatched = []
+
+    recovered.sort(key=lambda item: item["scene_index"])
+    return {
+        "recovered": recovered,
+        "recovered_count": len(recovered),
+        "unmatched_scene_indexes": [scene.scene_index for scene in unmatched],
+        "cache_file_count": len(cached_files),
+        "ordered_fallback_used": ordered_fallback_used,
+        "cloud_requests": 0,
+    }
+
+
 @app.post("/api/generate/image")
 async def generate_image(request: GenerateImageRequest):
     try:
         seed = stable_seed(request.prompt)
-        prompt = append_visual_lock_to_prompt(request.prompt, request.visual_lock)
+        prompt, cache_key = build_single_image_cache_key(request)
         provider_config = get_image_provider_config(request.image_provider)
-        cache_key = (
-            f"single-{request.scene_index}-{request.lyric_id or ''}-"
-            f"{request.character_id or ''}-{request.anchor_image or ''}-"
-            f"{'|'.join(request.reference_images)}-{prompt}"
-        )
         if provider_config.provider == "placeholder":
             image_url = get_placeholder_url(seed, provider_config)
         else:

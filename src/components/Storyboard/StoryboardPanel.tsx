@@ -694,6 +694,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
   const [isVisualLockDrawerOpen, setVisualLockDrawerOpen] = useState(false)
   const [isImageQueueRunning, setImageQueueRunning] = useState(false)
   const [isVideoQueueRunning, setVideoQueueRunning] = useState(false)
+  const [isRestoringKeyframes, setRestoringKeyframes] = useState(false)
   const imageQueueCancelRef = useRef(false)
   const videoQueueCancelRef = useRef(false)
   const imageQueueAbortRef = useRef<AbortController | null>(null)
@@ -1591,6 +1592,85 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
     }
   }
 
+  const handleRestoreCachedKeyframes = async () => {
+    const missingScenes = project.scenes.filter((scene) => !scene.image_url)
+    if (missingScenes.length === 0) {
+      message.info('当前分镜没有缺失关键帧')
+      return
+    }
+
+    setRestoringKeyframes(true)
+    try {
+      const response = await apiClient.post('/api/images/cache/restore', {
+        scenes: missingScenes.map((scene) => {
+          const character = scene.character_id ? project.analysis?.characters?.[scene.character_id] : undefined
+          const stageAnchor = scene.character_stage_id
+            ? character?.stages?.[scene.character_stage_id]?.anchor_image
+            : character?.anchor_image
+          const locationAnchor = scene.location_id
+            ? project.visualBible?.locations?.[scene.location_id]?.anchor_image
+            : undefined
+          const propAnchors = (scene.hero_prop_ids ?? [])
+            .map((propId) => project.visualBible?.hero_props?.[propId]?.anchor_image)
+            .filter((value): value is string => Boolean(value))
+          const styleReference = project.visualBible?.reference_images?.[0]
+          const referenceImages = [stageAnchor, styleReference, locationAnchor, ...propAnchors]
+            .filter((value): value is string => Boolean(value))
+            .slice(0, 4)
+          return {
+            scene_index: scene.scene_index,
+            prompt: scene.prompt,
+            character_id: scene.character_id || '',
+            anchor_image: stageAnchor || '',
+            reference_images: referenceImages,
+          }
+        }),
+        visual_lock: toBackendVisualLock(project.visualLock),
+        allow_ordered_fallback: true,
+      })
+
+      const recoveredItems = Array.isArray(response.data.recovered) ? response.data.recovered : []
+      const recoveredByIndex = new Map<number, string>(
+        recoveredItems
+          .filter((item: { scene_index?: unknown; image_url?: unknown }) =>
+            typeof item.scene_index === 'number' && typeof item.image_url === 'string'
+          )
+          .map((item: { scene_index: number; image_url: string }) => [item.scene_index, item.image_url])
+      )
+      const nextScenes = project.scenes.map((scene) => {
+        const imageUrl = recoveredByIndex.get(scene.scene_index)
+        return imageUrl
+          ? {
+              ...scene,
+              image_url: imageUrl,
+              first_frame: imageUrl,
+              image_status: 'done' as GenerationStatus,
+              generation_status: 'done' as GenerationStatus,
+              generation_error: undefined,
+            }
+          : scene
+      })
+      setScenes(nextScenes, project.analysis)
+
+      const unmatchedCount = Array.isArray(response.data.unmatched_scene_indexes)
+        ? response.data.unmatched_scene_indexes.length
+        : Math.max(0, missingScenes.length - recoveredByIndex.size)
+      if (recoveredByIndex.size === 0) {
+        message.warning(`本地缓存有 ${response.data.cache_file_count || 0} 张图片，但没有找到可安全恢复的对应关系`)
+      } else if (response.data.ordered_fallback_used) {
+        message.warning(`已按原生成顺序恢复 ${recoveredByIndex.size} 张关键帧，请快速检查画面顺序后保存工程`)
+      } else if (unmatchedCount > 0) {
+        message.warning(`已精确恢复 ${recoveredByIndex.size} 张关键帧，仍有 ${unmatchedCount} 个镜头未匹配`)
+      } else {
+        message.success(`已从本地缓存精确恢复 ${recoveredByIndex.size} 张关键帧，请立即保存工程`)
+      }
+    } catch (error) {
+      message.error(`恢复本地关键帧失败：${getErrorMessage(error)}`)
+    } finally {
+      setRestoringKeyframes(false)
+    }
+  }
+
   const handleGenerateVideoQueue = async () => {
     if (project.scenes.length === 0) {
       message.warning('请先生成智能分镜')
@@ -2166,6 +2246,16 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
           style={{ borderRadius: 6, fontSize: 12 }}
         >
           任务历史{project.generationLogs?.length ? ` ${project.generationLogs.length}` : ''}
+        </Button>
+        <Button
+          size="small"
+          icon={<ReloadOutlined />}
+          onClick={handleRestoreCachedKeyframes}
+          loading={isRestoringKeyframes}
+          disabled={project.scenes.length === 0 || isGenerating || isImageQueueRunning || isVideoQueueRunning}
+          style={{ borderRadius: 6, fontSize: 12 }}
+        >
+          恢复本地关键帧
         </Button>
         <Button
           size="small"
