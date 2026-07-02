@@ -1883,10 +1883,16 @@ def is_valid_jwt_token(token: str) -> bool:
     return isinstance(header, dict) and isinstance(payload, dict) and bool(header.get("alg"))
 
 
+def is_valid_kling_api_key(token: str) -> bool:
+    prefix = "api-key-kling-"
+    suffix = token[len(prefix):] if token.startswith(prefix) else ""
+    return len(suffix) >= 20 and re.fullmatch(r"[A-Za-z0-9_-]+", suffix) is not None
+
+
 def kling_credential_error() -> HTTPException:
     return HTTPException(
         status_code=400,
-        detail="Kling 凭证格式错误：请填写 AccessKey:SecretKey，或完整的三段式 JWT Token",
+        detail="Kling 凭证格式错误：请填写新版 api-key-kling-...，或旧版 AccessKey:SecretKey / JWT Token",
     )
 
 
@@ -1904,19 +1910,19 @@ def get_kling_auth_token(provider_config: VideoProviderConfig) -> str:
             raise kling_credential_error()
         return create_kling_jwt(access_key, secret_key)
     elif raw_key:
-        if is_valid_jwt_token(raw_key):
+        if is_valid_kling_api_key(raw_key) or is_valid_jwt_token(raw_key):
             return raw_key
         raise kling_credential_error()
 
     if env_token:
-        if is_valid_jwt_token(env_token):
+        if is_valid_kling_api_key(env_token) or is_valid_jwt_token(env_token):
             return env_token
         raise kling_credential_error()
 
     if access_key and secret_key:
         return create_kling_jwt(access_key, secret_key)
 
-    raise HTTPException(status_code=400, detail="Kling 需要填写 AccessKey:SecretKey 或完整 JWT Token")
+    raise HTTPException(status_code=400, detail="Kling 需要填写新版 API Key，或旧版 AccessKey:SecretKey / JWT Token")
 
 
 def kling_response_body(response: httpx.Response) -> str:
@@ -1940,11 +1946,19 @@ def parse_kling_response(response: httpx.Response, action: str) -> dict:
     if code not in (None, 0, "0"):
         provider_message = str(data.get("message") or data.get("msg") or "未知错误")[:300]
         if str(code) == "1002":
-            detail = "Kling 凭证无效或 AccessKey 不存在，请检查 AccessKey:SecretKey 是否来自 Kling 开放平台"
+            detail = "Kling 凭证无效或已撤销：请检查新版 API Key，或旧版 AccessKey:SecretKey 是否来自 Kling 开放平台"
         else:
             detail = f"Kling {action}失败（错误码 {code}）：{provider_message}"
         raise HTTPException(status_code=502, detail=detail)
     return data
+
+
+def kling_http_error_detail(response: httpx.Response, action: str) -> str:
+    try:
+        parse_kling_response(response, action)
+    except HTTPException as exc:
+        return str(exc.detail)
+    return f"Kling {action}失败（HTTP {response.status_code}）：{kling_response_body(response)}"
 
 
 def extract_kling_task_data(response_data: dict, action: str) -> dict:
@@ -2261,7 +2275,7 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
                     status_code=502,
-                    detail=f"Kling 查询任务失败（HTTP {exc.response.status_code}）：{kling_response_body(exc.response)}",
+                    detail=kling_http_error_detail(exc.response, "查询任务"),
                 ) from exc
             except httpx.RequestError as exc:
                 raise HTTPException(status_code=502, detail=f"无法连接 Kling 查询任务：{exc}") from exc
@@ -2274,7 +2288,7 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
                     status_code=502,
-                    detail=f"Kling 创建任务失败（HTTP {exc.response.status_code}）：{kling_response_body(exc.response)}",
+                    detail=kling_http_error_detail(exc.response, "创建任务"),
                 ) from exc
             except httpx.RequestError as exc:
                 raise HTTPException(status_code=502, detail=f"无法连接 Kling 创建任务：{exc}") from exc
@@ -2332,7 +2346,7 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
                     status_code=502,
-                    detail=f"Kling 查询任务失败（HTTP {exc.response.status_code}）：{kling_response_body(exc.response)}",
+                    detail=kling_http_error_detail(exc.response, "查询任务"),
                 ) from exc
             except httpx.RequestError as exc:
                 raise HTTPException(status_code=502, detail=f"无法连接 Kling 查询任务：{exc}") from exc

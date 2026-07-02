@@ -28,8 +28,8 @@ class MockKlingHandler(BaseHTTPRequestHandler):
     create_count = 0
     query_count = 0
 
-    def send_payload(self, payload: bytes, content_type: str = "application/json") -> None:
-        self.send_response(200)
+    def send_payload(self, payload: bytes, content_type: str = "application/json", status: int = 200) -> None:
+        self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -48,7 +48,7 @@ class MockKlingHandler(BaseHTTPRequestHandler):
             self.send_payload(b"upstream gateway failure", "text/plain")
             return
         if type(self).mode == "invalid_key":
-            self.send_payload(json.dumps({"code": 1002, "message": "api key not found"}).encode())
+            self.send_payload(json.dumps({"code": 1002, "message": "api key not found"}).encode(), status=401)
             return
         if type(self).mode == "missing_task_id":
             self.send_payload(json.dumps({"code": 0, "data": {"task_status": "submitted"}}).encode())
@@ -145,6 +145,17 @@ class KlingVideoTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(main.is_valid_jwt_token(token))
         self.assertEqual(len(token.split(".")), 3)
 
+    def test_new_api_key_is_accepted_without_modification(self) -> None:
+        new_api_key = "api-key-kling-offline_test_key_1234567890"
+        self.provider.api_key = new_api_key
+        self.assertEqual(main.get_kling_auth_token(self.provider), new_api_key)
+
+    def test_incomplete_new_api_key_is_rejected(self) -> None:
+        self.provider.api_key = "api-key-kling-short"
+        with self.assertRaises(HTTPException) as caught:
+            main.get_kling_auth_token(self.provider)
+        self.assertEqual(caught.exception.status_code, 400)
+
     def test_malformed_jwt_is_rejected_without_decode_error(self) -> None:
         self.provider.api_key = "not-base64.not-base64.signature"
         with self.assertRaises(HTTPException) as caught:
@@ -170,6 +181,7 @@ class KlingVideoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_provider_code_1002_has_actionable_error_and_is_not_saved(self) -> None:
         MockKlingHandler.mode = "invalid_key"
+        self.provider.api_key = "api-key-kling-offline_invalid_key_123456"
         with self.assertRaises(HTTPException) as caught:
             await main.generate_kling_video(self.request(2), self.provider, 5.0)
         self.assertEqual(caught.exception.status_code, 502)

@@ -1,7 +1,11 @@
 export const validateKlingCredential = (credential: string): string | null => {
   const value = credential.trim()
   if (!value) {
-    return 'Kling 需要填写 AccessKey:SecretKey 或完整 JWT Token'
+    return 'Kling 需要填写新版 API Key，或旧版 AccessKey:SecretKey / JWT Token'
+  }
+
+  if (/^api-key-kling-[A-Za-z0-9_-]{20,}$/.test(value)) {
+    return null
   }
 
   if (value.includes(':')) {
@@ -18,5 +22,5 @@ export const validateKlingCredential = (credential: string): string | null => {
     return null
   }
 
-  return 'Kling 凭证格式错误：请填写 AccessKey:SecretKey，或完整的三段式 JWT Token'
+  return 'Kling 凭证格式错误：请填写新版 api-key-kling-...，或旧版 AccessKey:SecretKey / JWT Token'
 }

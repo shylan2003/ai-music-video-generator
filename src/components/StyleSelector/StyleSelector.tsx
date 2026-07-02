@@ -229,7 +229,7 @@ const videoProviderOptions: Array<{
   {
     value: 'kling',
     label: 'Kling 付费',
-    desc: '适合图生视频和中文古风场景，需要开放平台 AccessKey 与 SecretKey',
+    desc: '支持开放平台新版 API Key，也兼容旧版 AccessKey 与 SecretKey',
     defaultModel: 'kling-v2-5-turbo',
     requiresKey: true,
   },
@@ -798,16 +798,16 @@ const StyleSelector: React.FC = () => {
           {currentVideoProvider.requiresKey && (
             <div>
               <Text style={{ color: '#64748b', fontSize: 12, display: 'block', marginBottom: 6 }}>
-                {videoSettings.provider === 'kling' ? 'Kling AccessKey:SecretKey 或 JWT Token' : 'API Key'}
+                {videoSettings.provider === 'kling' ? 'Kling 新版 API Key / 旧版凭证' : 'API Key'}
               </Text>
               <Input.Password
                 value={videoSettings.apiKey}
                 onChange={(event) => setVideoSettings({ apiKey: event.target.value })}
-                placeholder={videoSettings.provider === 'kling' ? 'AccessKey:SecretKey' : '请输入视频模型 API Key'}
+                placeholder={videoSettings.provider === 'kling' ? 'api-key-kling-... 或 AccessKey:SecretKey' : '请输入视频模型 API Key'}
               />
               {videoSettings.provider === 'kling' && (
                 <Text style={{ color: '#94a3b8', fontSize: 11, lineHeight: 1.6 }}>
-                  请使用 Kling 开放平台凭证，不是可灵网页账号、通义或 DeepSeek 的 Key。
+                  支持新版 api-key-kling-...，以及旧版 AccessKey:SecretKey / JWT；不是可灵网页会员、通义或 DeepSeek 的 Key。
                 </Text>
               )}
             </div>
