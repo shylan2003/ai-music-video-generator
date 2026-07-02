@@ -20,6 +20,7 @@ import {
 import axios from 'axios'
 import { apiClient } from '@/api/client'
 import { useAppStore, type GenerationLog, type GenerationStatus, type ImageGenerationSettings, type LyricLine, type ProjectAsset, type Scene, type StoryAnalysis, type VisualLockSettings } from '@/store/useAppStore'
+import { normalizeGenerationStatus } from '@/utils/generationStatus'
 
 
 const { Text, Title } = Typography
@@ -89,6 +90,11 @@ const videoStatusMeta: Record<GenerationStatus, { color: string; label: string }
   done: { color: 'success', label: '视频已就绪' },
   error: { color: 'error', label: '视频失败' },
 }
+
+const getStatusMeta = (
+  statusMeta: Record<GenerationStatus, { color: string; label: string }>,
+  status?: string
+) => statusMeta[normalizeGenerationStatus(status)]
 
 const getErrorMessage = (error: unknown) => {
   if (axios.isAxiosError(error)) {
@@ -817,9 +823,18 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
   }
 
   const applyStoryboardResult = (scenes: Scene[], analysis: StoryAnalysis) => {
+    const normalizedScenes = scenes.map((scene) => ({
+      ...scene,
+      lyric_ids: Array.isArray(scene.lyric_ids) ? scene.lyric_ids : [],
+      hero_prop_ids: Array.isArray(scene.hero_prop_ids) ? scene.hero_prop_ids : [],
+      quality_errors: Array.isArray(scene.quality_errors) ? scene.quality_errors : [],
+      image_status: normalizeGenerationStatus(scene.image_status || scene.generation_status),
+      video_status: normalizeGenerationStatus(scene.video_status),
+      generation_status: normalizeGenerationStatus(scene.generation_status || scene.image_status),
+    }))
     const providerCompatibleScenes = videoSettings.provider === 'runway'
-      ? scenes.map((scene) => ({ ...scene, transition: 'cut' }))
-      : scenes
+      ? normalizedScenes.map((scene) => ({ ...scene, transition: 'cut' }))
+      : normalizedScenes
     const sceneMap: Record<string, number> = {}
 
     providerCompatibleScenes.forEach((scene) => {
@@ -2446,13 +2461,13 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
                       {scene.title}
                     </Text>
                     <Tooltip title={scene.generation_error || '关键帧图片状态'}>
-                      <Tag color={imageStatusMeta[scene.image_status ?? 'idle'].color} style={{ fontSize: 10, margin: 0 }}>
-                        {imageStatusMeta[scene.image_status ?? 'idle'].label}
+                      <Tag color={getStatusMeta(imageStatusMeta, scene.image_status).color} style={{ fontSize: 10, margin: 0 }}>
+                        {getStatusMeta(imageStatusMeta, scene.image_status).label}
                       </Tag>
                     </Tooltip>
                     <Tooltip title={scene.video_error || '视频片段状态'}>
-                      <Tag color={videoStatusMeta[scene.video_status ?? 'idle'].color} style={{ fontSize: 10, margin: 0 }}>
-                        {videoStatusMeta[scene.video_status ?? 'idle'].label}
+                      <Tag color={getStatusMeta(videoStatusMeta, scene.video_status).color} style={{ fontSize: 10, margin: 0 }}>
+                        {getStatusMeta(videoStatusMeta, scene.video_status).label}
                       </Tag>
                     </Tooltip>
                     {scene.video_status === 'done' && (

@@ -1,4 +1,5 @@
 import { GenerationPolicy, Project, Scene, StoryAnalysis } from '../store/useAppStore'
+import { normalizeGenerationStatus } from './generationStatus'
 
 const defaultGenerationPolicy = (): GenerationPolicy => ({
   mode: 'cloud_all',
@@ -44,6 +45,11 @@ const migrateAnalysis = (analysis?: StoryAnalysis): StoryAnalysis | undefined =>
 
 const migrateScene = (scene: Scene): Scene => ({
   ...scene,
+  lyric_ids: Array.isArray(scene.lyric_ids) ? scene.lyric_ids : [],
+  hero_prop_ids: Array.isArray(scene.hero_prop_ids) ? scene.hero_prop_ids : [],
+  image_status: normalizeGenerationStatus(scene.image_status || scene.generation_status),
+  video_status: normalizeGenerationStatus(scene.video_status),
+  generation_status: normalizeGenerationStatus(scene.generation_status || scene.image_status),
   character_stage_id: scene.character_stage_id || (scene.character_id ? 'default' : undefined),
   first_frame: scene.first_frame || scene.image_url,
   requested_duration: scene.requested_duration || Math.max(0.5, scene.end_time - scene.start_time),
@@ -54,7 +60,7 @@ const migrateScene = (scene: Scene): Scene => ({
     : scene.quality_status || (scene.video_url ? 'needs_review' : 'pending'),
   quality_errors: scene.video_url?.startsWith('local-motion://')
     ? ['旧工程本地动态不能作为全云端正式镜头']
-    : scene.quality_errors || [],
+    : Array.isArray(scene.quality_errors) ? scene.quality_errors : [],
 })
 
 export const normalizeLoadedProject = (payload: unknown): Project => {
