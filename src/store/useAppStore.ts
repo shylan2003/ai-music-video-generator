@@ -403,7 +403,7 @@ export const defaultModelTemplates: ModelTemplate[] = [
     provider: 'kling',
     model: 'kling-v2-5-turbo',
     requiresKey: true,
-    description: '支持 Token 或 AccessKey:SecretKey，适合中文古风画面。',
+    description: '仅支持 Kling 开放平台新版 API Key，适合中文古风画面。',
   },
   {
     id: 'video-custom',

@@ -8,10 +8,8 @@ import uvicorn
 import asyncio
 import re
 import hashlib
-import hmac
 import json
 import base64
-import binascii
 import os
 import subprocess
 import sys
@@ -1850,39 +1848,6 @@ def is_public_https_url(url: str) -> bool:
     return url.startswith("https://")
 
 
-def base64url_encode(payload: bytes) -> str:
-    return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("utf-8")
-
-
-def create_kling_jwt(access_key: str, secret_key: str) -> str:
-    now = int(time.time())
-    header = {"alg": "HS256", "typ": "JWT"}
-    payload = {
-        "iss": access_key,
-        "exp": now + 1800,
-        "nbf": now - 5,
-    }
-    signing_input = ".".join([
-        base64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8")),
-        base64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")),
-    ])
-    signature = hmac.new(secret_key.encode("utf-8"), signing_input.encode("utf-8"), hashlib.sha256).digest()
-    return f"{signing_input}.{base64url_encode(signature)}"
-
-
-def is_valid_jwt_token(token: str) -> bool:
-    parts = token.split(".")
-    if len(parts) != 3 or any(not part for part in parts):
-        return False
-    try:
-        header_part, payload_part, _signature = parts
-        header = json.loads(base64.urlsafe_b64decode(header_part + "=" * (-len(header_part) % 4)))
-        payload = json.loads(base64.urlsafe_b64decode(payload_part + "=" * (-len(payload_part) % 4)))
-    except (ValueError, json.JSONDecodeError, UnicodeDecodeError, binascii.Error):
-        return False
-    return isinstance(header, dict) and isinstance(payload, dict) and bool(header.get("alg"))
-
-
 def is_valid_kling_api_key(token: str) -> bool:
     prefix = "api-key-kling-"
     suffix = token[len(prefix):] if token.startswith(prefix) else ""
@@ -1892,37 +1857,25 @@ def is_valid_kling_api_key(token: str) -> bool:
 def kling_credential_error() -> HTTPException:
     return HTTPException(
         status_code=400,
-        detail="Kling 凭证格式错误：请填写新版 api-key-kling-...，或旧版 AccessKey:SecretKey / JWT Token",
+        detail="Kling API Key 格式错误：必须以 api-key-kling- 开头，请从 Kling 开放平台重新复制",
     )
 
 
 def get_kling_auth_token(provider_config: VideoProviderConfig) -> str:
     raw_key = (provider_config.api_key or "").strip()
     env_token = os.getenv("KLING_API_TOKEN", "").strip()
-    access_key = os.getenv("KLING_ACCESS_KEY", "").strip()
-    secret_key = os.getenv("KLING_SECRET_KEY", "").strip()
 
-    if ":" in raw_key:
-        access_key, secret_key = raw_key.split(":", 1)
-        access_key = access_key.strip()
-        secret_key = secret_key.strip()
-        if not access_key or not secret_key:
-            raise kling_credential_error()
-        return create_kling_jwt(access_key, secret_key)
-    elif raw_key:
-        if is_valid_kling_api_key(raw_key) or is_valid_jwt_token(raw_key):
+    if raw_key:
+        if is_valid_kling_api_key(raw_key):
             return raw_key
         raise kling_credential_error()
 
     if env_token:
-        if is_valid_kling_api_key(env_token) or is_valid_jwt_token(env_token):
+        if is_valid_kling_api_key(env_token):
             return env_token
         raise kling_credential_error()
 
-    if access_key and secret_key:
-        return create_kling_jwt(access_key, secret_key)
-
-    raise HTTPException(status_code=400, detail="Kling 需要填写新版 API Key，或旧版 AccessKey:SecretKey / JWT Token")
+    raise HTTPException(status_code=400, detail="Kling 需要填写以 api-key-kling- 开头的新版 API Key")
 
 
 def kling_response_body(response: httpx.Response) -> str:
@@ -1946,7 +1899,7 @@ def parse_kling_response(response: httpx.Response, action: str) -> dict:
     if code not in (None, 0, "0"):
         provider_message = str(data.get("message") or data.get("msg") or "未知错误")[:300]
         if str(code) == "1002":
-            detail = "Kling 凭证无效或已撤销：请检查新版 API Key，或旧版 AccessKey:SecretKey 是否来自 Kling 开放平台"
+            detail = "Kling API Key 无效或已撤销，请在开放平台重新生成并确认 API 套餐已启用"
         else:
             detail = f"Kling {action}失败（错误码 {code}）：{provider_message}"
         raise HTTPException(status_code=502, detail=detail)

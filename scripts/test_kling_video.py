@@ -110,7 +110,7 @@ class KlingVideoTests(unittest.IsolatedAsyncioTestCase):
         self.provider = main.VideoProviderConfig(
             provider="kling",
             model="kling-v2-5-turbo",
-            api_key="offline-access:offline-secret",
+            api_key="api-key-kling-offline_default_key_1234567890",
             base_url=f"http://127.0.0.1:{self.server.server_port}",
         )
 
@@ -132,18 +132,21 @@ class KlingVideoTests(unittest.IsolatedAsyncioTestCase):
             style_fingerprint="offline-style",
         )
 
-    async def test_invalid_single_key_is_rejected_before_http_request(self) -> None:
+    async def test_invalid_key_is_rejected_before_http_request(self) -> None:
         self.provider.api_key = "only-an-access-key"
         with self.assertRaises(HTTPException) as caught:
             await main.generate_kling_video(self.request(), self.provider, 5.0)
         self.assertEqual(caught.exception.status_code, 400)
-        self.assertIn("AccessKey:SecretKey", caught.exception.detail)
+        self.assertIn("api-key-kling-", caught.exception.detail)
         self.assertEqual(MockKlingHandler.create_count, 0)
 
-    def test_access_secret_pair_creates_standard_jwt(self) -> None:
-        token = main.get_kling_auth_token(self.provider)
-        self.assertTrue(main.is_valid_jwt_token(token))
-        self.assertEqual(len(token.split(".")), 3)
+    async def test_legacy_access_secret_pair_is_rejected_before_http_request(self) -> None:
+        self.provider.api_key = "legacy-access:legacy-secret"
+        with self.assertRaises(HTTPException) as caught:
+            await main.generate_kling_video(self.request(), self.provider, 5.0)
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertIn("api-key-kling-", caught.exception.detail)
+        self.assertEqual(MockKlingHandler.create_count, 0)
 
     def test_new_api_key_is_accepted_without_modification(self) -> None:
         new_api_key = "api-key-kling-offline_test_key_1234567890"
@@ -156,8 +159,8 @@ class KlingVideoTests(unittest.IsolatedAsyncioTestCase):
             main.get_kling_auth_token(self.provider)
         self.assertEqual(caught.exception.status_code, 400)
 
-    def test_malformed_jwt_is_rejected_without_decode_error(self) -> None:
-        self.provider.api_key = "not-base64.not-base64.signature"
+    def test_legacy_jwt_is_rejected(self) -> None:
+        self.provider.api_key = "legacy.header.signature"
         with self.assertRaises(HTTPException) as caught:
             main.get_kling_auth_token(self.provider)
         self.assertEqual(caught.exception.status_code, 400)
@@ -185,7 +188,8 @@ class KlingVideoTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as caught:
             await main.generate_kling_video(self.request(2), self.provider, 5.0)
         self.assertEqual(caught.exception.status_code, 502)
-        self.assertIn("凭证无效", caught.exception.detail)
+        self.assertIn("API Key", caught.exception.detail)
+        self.assertIn("无效", caught.exception.detail)
         self.assertEqual(main.load_video_tasks(), {})
 
     async def test_non_json_response_has_actionable_error_and_is_not_saved(self) -> None:
