@@ -2189,7 +2189,7 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
             cached=True,
         )
 
-    base_url = (provider_config.base_url or "").strip() or "https://api.klingai.com/v1"
+    base_url = (provider_config.base_url or "").strip() or "https://api-beijing.klingai.com/v1"
     base_url = base_url.rstrip("/")
     headers = {
         "Authorization": f"Bearer {token}",
