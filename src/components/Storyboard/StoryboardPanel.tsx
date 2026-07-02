@@ -22,6 +22,7 @@ import { apiClient } from '@/api/client'
 import { useAppStore, type GenerationLog, type GenerationStatus, type ImageGenerationSettings, type LyricLine, type ProjectAsset, type Scene, type StoryAnalysis, type VisualLockSettings } from '@/store/useAppStore'
 import { normalizeGenerationStatus } from '@/utils/generationStatus'
 import { buildLyricTimingEnergy } from '@/utils/musicEnergy'
+import { validateKlingCredential } from '@/utils/videoCredentials'
 
 
 const { Text, Title } = Typography
@@ -1699,6 +1700,14 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
     if (['none', 'local_motion'].includes(videoSettings.provider)) {
       message.warning('全云端模式必须选择 Kling、Runway、Luma 或自定义云端视频模型')
       return
+    }
+
+    if (videoSettings.provider === 'kling') {
+      const credentialError = validateKlingCredential(videoSettings.apiKey)
+      if (credentialError) {
+        message.error(credentialError)
+        return
+      }
     }
 
     const styleFingerprint = project.visualBible?.fingerprint || project.analysis?.visual_bible?.fingerprint || ''

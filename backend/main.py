@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import base64
+import binascii
 import os
 import subprocess
 import sys
@@ -1785,6 +1786,26 @@ def create_kling_jwt(access_key: str, secret_key: str) -> str:
     return f"{signing_input}.{base64url_encode(signature)}"
 
 
+def is_valid_jwt_token(token: str) -> bool:
+    parts = token.split(".")
+    if len(parts) != 3 or any(not part for part in parts):
+        return False
+    try:
+        header_part, payload_part, _signature = parts
+        header = json.loads(base64.urlsafe_b64decode(header_part + "=" * (-len(header_part) % 4)))
+        payload = json.loads(base64.urlsafe_b64decode(payload_part + "=" * (-len(payload_part) % 4)))
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError, binascii.Error):
+        return False
+    return isinstance(header, dict) and isinstance(payload, dict) and bool(header.get("alg"))
+
+
+def kling_credential_error() -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail="Kling 凭证格式错误：请填写 AccessKey:SecretKey，或完整的三段式 JWT Token",
+    )
+
+
 def get_kling_auth_token(provider_config: VideoProviderConfig) -> str:
     raw_key = (provider_config.api_key or "").strip()
     env_token = os.getenv("KLING_API_TOKEN", "").strip()
@@ -1795,16 +1816,58 @@ def get_kling_auth_token(provider_config: VideoProviderConfig) -> str:
         access_key, secret_key = raw_key.split(":", 1)
         access_key = access_key.strip()
         secret_key = secret_key.strip()
+        if not access_key or not secret_key:
+            raise kling_credential_error()
+        return create_kling_jwt(access_key, secret_key)
     elif raw_key:
-        return raw_key
+        if is_valid_jwt_token(raw_key):
+            return raw_key
+        raise kling_credential_error()
 
     if env_token:
-        return env_token
+        if is_valid_jwt_token(env_token):
+            return env_token
+        raise kling_credential_error()
 
     if access_key and secret_key:
         return create_kling_jwt(access_key, secret_key)
 
-    raise HTTPException(status_code=400, detail="Kling 需要 API Token，或填写 AccessKey:SecretKey")
+    raise HTTPException(status_code=400, detail="Kling 需要填写 AccessKey:SecretKey 或完整 JWT Token")
+
+
+def kling_response_body(response: httpx.Response) -> str:
+    body = (response.text or "").strip().replace("\r", " ").replace("\n", " ")
+    return body[:400] or "空响应"
+
+
+def parse_kling_response(response: httpx.Response, action: str) -> dict:
+    try:
+        data = response.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Kling {action}返回了无法解析的响应（HTTP {response.status_code}）：{kling_response_body(response)}",
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail=f"Kling {action}返回格式异常：应为 JSON 对象")
+
+    code = data.get("code")
+    if code not in (None, 0, "0"):
+        provider_message = str(data.get("message") or data.get("msg") or "未知错误")[:300]
+        if str(code) == "1002":
+            detail = "Kling 凭证无效或 AccessKey 不存在，请检查 AccessKey:SecretKey 是否来自 Kling 开放平台"
+        else:
+            detail = f"Kling {action}失败（错误码 {code}）：{provider_message}"
+        raise HTTPException(status_code=502, detail=detail)
+    return data
+
+
+def extract_kling_task_data(response_data: dict, action: str) -> dict:
+    task_data = response_data.get("data", response_data)
+    if not isinstance(task_data, dict):
+        raise HTTPException(status_code=502, detail=f"Kling {action}返回格式异常：缺少任务对象")
+    return task_data
 
 
 def get_kling_model(model: str) -> str:
@@ -2081,16 +2144,24 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
+    try:
+        first_frame = await get_kling_image_source(request.image_url)
+        last_frame = await get_kling_image_source(request.last_frame_url) if request.last_frame_url else ""
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Kling 关键帧读取失败：{exc}") from exc
+
     payload = {
         "model_name": get_kling_model(provider_config.model),
-        "image": await get_kling_image_source(request.image_url),
+        "image": first_frame,
         "prompt": (request.prompt or "")[:2500],
         "duration": get_kling_duration(duration),
         "mode": "std",
         "cfg_scale": 0.5,
     }
-    if request.last_frame_url:
-        payload["image_tail"] = await get_kling_image_source(request.last_frame_url)
+    if last_frame:
+        payload["image_tail"] = last_frame
 
     async with httpx.AsyncClient(
         timeout=120.0,
@@ -2100,25 +2171,36 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
         resumable = get_resumable_video_task(cache_key, "kling")
         task_id = str(resumable.get("task_id")) if resumable and resumable.get("task_id") else ""
         if task_id:
-            task_response = await client.get(f"{base_url}/videos/image2video/{task_id}", headers=headers)
-            task_response.raise_for_status()
-            query_data = task_response.json()
-            task_data = query_data.get("data") if isinstance(query_data, dict) and isinstance(query_data.get("data"), dict) else query_data
+            try:
+                task_response = await client.get(f"{base_url}/videos/image2video/{task_id}", headers=headers)
+                task_response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Kling 查询任务失败（HTTP {exc.response.status_code}）：{kling_response_body(exc.response)}",
+                ) from exc
+            except httpx.RequestError as exc:
+                raise HTTPException(status_code=502, detail=f"无法连接 Kling 查询任务：{exc}") from exc
+            query_data = parse_kling_response(task_response, "查询任务")
+            task_data = extract_kling_task_data(query_data, "查询任务")
         else:
             try:
                 create_response = await client.post(f"{base_url}/videos/image2video", json=payload, headers=headers)
                 create_response.raise_for_status()
-                create_data = create_response.json()
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
-                    status_code=exc.response.status_code,
-                    detail=f"Kling 创建任务失败：{exc.response.text[:400]}",
+                    status_code=502,
+                    detail=f"Kling 创建任务失败（HTTP {exc.response.status_code}）：{kling_response_body(exc.response)}",
                 ) from exc
-            data = create_data.get("data") if isinstance(create_data, dict) else None
-            task_id = str(data.get("task_id") if isinstance(data, dict) else create_data.get("task_id") or "")
+            except httpx.RequestError as exc:
+                raise HTTPException(status_code=502, detail=f"无法连接 Kling 创建任务：{exc}") from exc
+            create_data = parse_kling_response(create_response, "创建任务")
+            data = extract_kling_task_data(create_data, "创建任务")
+            task_id_value = data.get("task_id")
+            task_id = str(task_id_value or "")
             if not task_id:
-                raise HTTPException(status_code=502, detail="Kling 未返回 task_id")
-            task_data = data if isinstance(data, dict) else create_data
+                raise HTTPException(status_code=502, detail="Kling 创建任务响应中缺少 task_id，任务未被记录，请勿连续重试")
+            task_data = data
             await save_video_task(cache_key, {
                 "provider": "kling", "task_id": task_id, "status": "pending", "scene_index": request.scene_index
             })
@@ -2132,7 +2214,17 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
                     video_url = task_data.get("video_url") or task_data.get("url")
                 if not video_url:
                     raise HTTPException(status_code=502, detail="Kling 任务成功但未返回视频 URL")
-                local_video_url = await download_video_to_cache(video_url, file_path)
+                try:
+                    local_video_url = await download_video_to_cache(video_url, file_path)
+                except httpx.HTTPStatusError as exc:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Kling 视频下载失败（HTTP {exc.response.status_code}）",
+                    ) from exc
+                except httpx.RequestError as exc:
+                    raise HTTPException(status_code=502, detail=f"无法连接 Kling 下载生成视频：{exc}") from exc
+                except Exception as exc:
+                    raise HTTPException(status_code=502, detail=f"Kling 视频保存失败：{exc}") from exc
                 await save_video_task(cache_key, {"status": "done", "local_video_url": local_video_url})
                 return completed_video_payload(
                     video_url=local_video_url,
@@ -2153,14 +2245,17 @@ async def generate_kling_video(request: GenerateVideoRequest, provider_config: V
             try:
                 task_response = await client.get(f"{base_url}/videos/image2video/{task_id}", headers=headers)
                 task_response.raise_for_status()
-                query_data = task_response.json()
             except httpx.HTTPStatusError as exc:
                 raise HTTPException(
-                    status_code=exc.response.status_code,
-                    detail=f"Kling 查询任务失败：{exc.response.text[:400]}",
+                    status_code=502,
+                    detail=f"Kling 查询任务失败（HTTP {exc.response.status_code}）：{kling_response_body(exc.response)}",
                 ) from exc
+            except httpx.RequestError as exc:
+                raise HTTPException(status_code=502, detail=f"无法连接 Kling 查询任务：{exc}") from exc
 
-            task_data = query_data.get("data") if isinstance(query_data, dict) and isinstance(query_data.get("data"), dict) else query_data
+            query_data = parse_kling_response(task_response, "查询任务")
+
+            task_data = extract_kling_task_data(query_data, "查询任务")
 
     raise HTTPException(status_code=504, detail="Kling 任务等待超时，请稍后重试")
 
