@@ -2264,12 +2264,14 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
           padding: '12px 18px',
           borderBottom: '1px solid var(--app-border)',
           display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
+          flexDirection: 'column',
+          alignItems: 'stretch',
+          gap: 10,
+          minWidth: 0,
           background: 'var(--app-bg)',
         }}
       >
-        <Space>
+        <Space size={8} wrap style={{ width: '100%' }}>
           <Title level={5} className="section-title">
             智能分镜
           </Title>
@@ -2280,7 +2282,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
           )}
         </Space>
 
-        <Space size={8}>
+        <Space size={[8, 8]} wrap style={{ width: '100%' }}>
         <Button
           size="small"
           icon={<LockOutlined />}
