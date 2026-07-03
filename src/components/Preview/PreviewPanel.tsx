@@ -8,6 +8,7 @@ import {
   StepForwardOutlined,
   FullscreenOutlined,
   FullscreenExitOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons'
 
 import { useAppStore } from '@/store/useAppStore'
@@ -127,6 +128,41 @@ const PreviewPanel: React.FC<Props> = ({ selectedSceneIndex }) => {
   )
 
   const previewImage = lockedScene?.image_url || currentScene?.image_url || null
+  const previewVideoUrl = lockedScene?.video_url && !lockedScene.video_url.startsWith('local-motion://')
+    ? lockedScene.video_url
+    : null
+
+  const handleSaveSelectedVideo = async () => {
+    if (!lockedScene || (!lockedScene.video_path && !previewVideoUrl)) {
+      message.warning('当前镜头没有可保存的视频片段')
+      return
+    }
+    if (!window.electronAPI?.saveFile || !window.electronAPI.saveVideoClip) {
+      message.error('当前环境不支持保存视频，请在 Electron 桌面版中使用')
+      return
+    }
+
+    const safeTitle = (lockedScene.title || `镜头-${lockedScene.scene_index + 1}`)
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+      .trim() || `镜头-${lockedScene.scene_index + 1}`
+    const saveResult = await window.electronAPI.saveFile({
+      title: '保存镜头视频',
+      defaultPath: `${safeTitle}.mp4`,
+      filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
+    })
+    if (saveResult?.canceled || !saveResult?.filePath) return
+
+    try {
+      await window.electronAPI.saveVideoClip({
+        sourcePath: lockedScene.video_path,
+        sourceUrl: previewVideoUrl || undefined,
+        outputPath: saveResult.filePath,
+      })
+      message.success(`视频已保存：${saveResult.filePath}`)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '视频保存失败')
+    }
+  }
 
   useEffect(() => {
     return () => {
@@ -270,8 +306,29 @@ const PreviewPanel: React.FC<Props> = ({ selectedSceneIndex }) => {
         }}
       >
 
-        {/* 场景图片或占位内容 */}
-        {previewImage ? (
+        {/* 选中镜头优先播放已生成视频，否则显示关键帧图片 */}
+        {previewVideoUrl ? (
+          <video
+            key={previewVideoUrl}
+            src={previewVideoUrl}
+            controls
+            playsInline
+            preload="metadata"
+            onPlay={() => {
+              setIsPlaying(false)
+              audioRef.current?.pause()
+              stopTimeline()
+            }}
+            onError={() => message.error('视频片段加载失败，请重新打开工程或检查本地缓存')}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'contain',
+              display: 'block',
+              background: '#000',
+            }}
+          />
+        ) : previewImage ? (
           // 显示选中场景图片
           <img
             src={previewImage}
@@ -373,7 +430,7 @@ const PreviewPanel: React.FC<Props> = ({ selectedSceneIndex }) => {
         )}
 
         {/* 选中场景标题叠加 */}
-        {lockedScene && (
+        {lockedScene && !previewVideoUrl && (
 
           <div
             style={{
@@ -578,6 +635,16 @@ const PreviewPanel: React.FC<Props> = ({ selectedSceneIndex }) => {
               <Text style={{ color: '#64748b', fontSize: 11 }}>
                 包含歌词：{lockedScene?.lyric_ids.length || 0} 行
               </Text>
+              {previewVideoUrl && (
+                <Button
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  onClick={handleSaveSelectedVideo}
+                  style={{ width: 'fit-content' }}
+                >
+                  保存此视频
+                </Button>
+              )}
               {lockedScene?.prompt && (
 
                 <div

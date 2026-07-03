@@ -176,6 +176,8 @@ class KlingVideoTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main.asyncio, "sleep", self.no_sleep):
             result = await main.generate_kling_video(self.request(1), self.provider, 5.0)
         self.assertEqual(result["task_id"], "offline-kling-task")
+        self.assertTrue(result["video_path"].endswith(".mp4"))
+        self.assertTrue(Path(result["video_path"]).exists())
         self.assertEqual(MockKlingHandler.create_count, 1)
         self.assertEqual(MockKlingHandler.query_count, 1)
         tasks = main.load_video_tasks()

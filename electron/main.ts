@@ -7,7 +7,7 @@ import { Transform } from 'stream'
 import { pipeline } from 'stream/promises'
 import { spawn, ChildProcess } from 'child_process'
 import { randomBytes } from 'crypto'
-import { pathToFileURL } from 'url'
+import { fileURLToPath, pathToFileURL } from 'url'
 import axios from 'axios'
 import ffmpegPath from 'ffmpeg-static'
 import { assertCloudExportScenes, type CloudExportScene } from './exportPolicy'
@@ -417,7 +417,7 @@ async function materializeSceneImage(source: string, tempDir: string, index: num
   }
 
   if (source.startsWith('file://')) {
-    const sourcePath = decodeURIComponent(new URL(source).pathname)
+    const sourcePath = fileURLToPath(source)
     await fs.copyFile(sourcePath, targetPath)
     return targetPath
   }
@@ -449,7 +449,7 @@ async function materializeSceneVideo(source: string, tempDir: string, index: num
   }
 
   if (source.startsWith('file://')) {
-    const sourcePath = decodeURIComponent(new URL(source).pathname)
+    const sourcePath = fileURLToPath(source)
     await fs.copyFile(sourcePath, targetPath)
     return targetPath
   }
@@ -1406,6 +1406,46 @@ ipcMain.handle('file:toUrl', async (_, filePath: string) => {
     throw new Error('文件路径无效')
   }
   return pathToFileURL(filePath).toString()
+})
+
+ipcMain.handle('video:saveClip', async (_, payload: {
+  sourcePath?: string
+  sourceUrl?: string
+  outputPath: string
+}) => {
+  const outputPath = payload?.outputPath
+  if (!outputPath || !path.isAbsolute(outputPath)) {
+    throw new Error('视频保存路径无效')
+  }
+
+  let sourcePath = payload?.sourcePath || ''
+  if (sourcePath && (!path.isAbsolute(sourcePath) || !existsSync(sourcePath))) {
+    sourcePath = ''
+  }
+
+  const sourceUrl = payload?.sourceUrl || ''
+  if (!sourcePath && sourceUrl.startsWith('file://')) {
+    const filePath = fileURLToPath(sourceUrl)
+    if (existsSync(filePath)) sourcePath = filePath
+  }
+  if (!sourcePath && path.isAbsolute(sourceUrl) && existsSync(sourceUrl)) {
+    sourcePath = sourceUrl
+  }
+
+  await fs.mkdir(path.dirname(outputPath), { recursive: true })
+  if (sourcePath) {
+    if (path.resolve(sourcePath) !== path.resolve(outputPath)) {
+      await fs.copyFile(sourcePath, outputPath)
+    }
+    return outputPath
+  }
+
+  if (/^https?:\/\//i.test(sourceUrl)) {
+    await downloadToFile(sourceUrl, outputPath, 1024 * 1024 * 1024, 120000)
+    return outputPath
+  }
+
+  throw new Error('找不到可保存的视频缓存，请重新打开工程或重试该镜头')
 })
 
 ipcMain.handle('backend:config', async () => ({

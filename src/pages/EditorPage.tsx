@@ -16,7 +16,7 @@ import LyricTimeline from '../components/Timeline/LyricTimeline'
 import StyleSelector from '../components/StyleSelector/StyleSelector'
 import PreviewPanel from '../components/Preview/PreviewPanel'
 import StoryboardPanel from '../components/Storyboard/StoryboardPanel'
-import { normalizeLoadedProject } from '../utils/projectFile'
+import { normalizeLoadedProject, restoreProjectAssetUrls } from '../utils/projectFile'
 
 const { Text } = Typography
 
@@ -133,7 +133,7 @@ const EditorPage: React.FC = () => {
 
     try {
       const fileText = await window.electronAPI.readTextFile(result.filePaths[0])
-      const loadedProject = normalizeLoadedProject(JSON.parse(fileText))
+      const loadedProject = await restoreProjectAssetUrls(normalizeLoadedProject(JSON.parse(fileText)))
       loadedProject.projectFilePath = result.filePaths[0]
       if (loadedProject.musicFilePath && await window.electronAPI.fileExists?.(loadedProject.musicFilePath)) {
         loadedProject.musicFile = await window.electronAPI.fileToUrl?.(loadedProject.musicFilePath)

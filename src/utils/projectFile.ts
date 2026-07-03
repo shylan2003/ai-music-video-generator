@@ -99,3 +99,51 @@ export const normalizeLoadedProject = (payload: unknown): Project => {
     createdAt: Number.isNaN(createdAt.getTime()) ? new Date() : createdAt,
   }
 }
+
+const remapCachedBackendUrl = (value: string | undefined, backendBaseUrl: string) => {
+  if (!value || !backendBaseUrl) return value
+
+  try {
+    const parsed = new URL(value)
+    const isLoopback = ['127.0.0.1', 'localhost', '0.0.0.0'].includes(parsed.hostname)
+    const isCachedAsset = parsed.pathname.startsWith('/generated/')
+      || parsed.pathname.startsWith('/generated-videos/')
+    if (!isLoopback || !isCachedAsset) return value
+    return `${backendBaseUrl.replace(/\/$/, '')}${parsed.pathname}${parsed.search}`
+  } catch {
+    return value
+  }
+}
+
+export const restoreProjectAssetUrls = async (project: Project): Promise<Project> => {
+  const electronApi = window.electronAPI
+  if (!electronApi) return project
+
+  let backendBaseUrl = ''
+  try {
+    backendBaseUrl = (await electronApi.getBackendConfig())?.baseUrl || ''
+  } catch {
+    // 本地路径仍可恢复；后端尚未启动时保留原 URL。
+  }
+
+  const scenes = await Promise.all(project.scenes.map(async (scene) => {
+    let imageUrl = remapCachedBackendUrl(scene.image_url, backendBaseUrl) || scene.image_url
+    let videoUrl = remapCachedBackendUrl(scene.video_url, backendBaseUrl)
+
+    if (scene.image_path && await electronApi.fileExists(scene.image_path)) {
+      imageUrl = await electronApi.fileToUrl(scene.image_path)
+    }
+    if (scene.video_path && await electronApi.fileExists(scene.video_path)) {
+      videoUrl = await electronApi.fileToUrl(scene.video_path)
+    }
+
+    return {
+      ...scene,
+      image_url: imageUrl,
+      first_frame: scene.first_frame === scene.image_url ? imageUrl : scene.first_frame,
+      video_url: videoUrl,
+    }
+  }))
+
+  return { ...project, scenes }
+}

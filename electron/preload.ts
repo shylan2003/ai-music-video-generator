@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('file:writeText', filePath, content),
   fileExists: (filePath: string) => ipcRenderer.invoke('file:exists', filePath),
   fileToUrl: (filePath: string) => ipcRenderer.invoke('file:toUrl', filePath),
+  saveVideoClip: (payload: { sourcePath?: string; sourceUrl?: string; outputPath: string }) =>
+    ipcRenderer.invoke('video:saveClip', payload),
   getBackendConfig: () => ipcRenderer.invoke('backend:config'),
   loadModelSettings: () =>
     ipcRenderer.invoke('settings:load'),

@@ -167,6 +167,7 @@ def completed_video_payload(
     quality_status, quality_errors, quality_metrics = basic_video_quality(file_path, requested_duration)
     return {
         "video_url": video_url,
+        "video_path": str(file_path.resolve()),
         "scene_index": scene_index,
         "provider": provider,
         "status": "done",

@@ -10,6 +10,7 @@ declare global {
       writeTextFile: (filePath: string, content: string) => Promise<boolean>
       fileExists: (filePath: string) => Promise<boolean>
       fileToUrl: (filePath: string) => Promise<string>
+      saveVideoClip: (payload: { sourcePath?: string; sourceUrl?: string; outputPath: string }) => Promise<string>
       getBackendConfig: () => Promise<{ baseUrl: string; token: string }>
       loadModelSettings: () => Promise<{
         directorSettings?: Partial<DirectorSettings>

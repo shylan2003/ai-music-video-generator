@@ -8,7 +8,7 @@ import {
   ExportOutlined,
 } from '@ant-design/icons'
 import { useAppStore } from '@/store/useAppStore'
-import { normalizeLoadedProject } from '@/utils/projectFile'
+import { normalizeLoadedProject, restoreProjectAssetUrls } from '@/utils/projectFile'
 
 const { Title, Text } = Typography
 
@@ -45,7 +45,7 @@ const HomePage: React.FC = () => {
 
     try {
       const fileText = await window.electronAPI.readTextFile(result.filePaths[0])
-      const loadedProject = normalizeLoadedProject(JSON.parse(fileText))
+      const loadedProject = await restoreProjectAssetUrls(normalizeLoadedProject(JSON.parse(fileText)))
       loadedProject.projectFilePath = result.filePaths[0]
       if (loadedProject.musicFilePath && await window.electronAPI.fileExists?.(loadedProject.musicFilePath)) {
         loadedProject.musicFile = await window.electronAPI.fileToUrl?.(loadedProject.musicFilePath)

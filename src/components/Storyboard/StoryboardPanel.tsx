@@ -877,6 +877,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
             video_status: 'idle' as GenerationStatus,
             generation_error: undefined,
             video_url: undefined,
+            video_path: undefined,
             video_provider: undefined,
             video_model: undefined,
             provider_task_id: undefined,
@@ -936,6 +937,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       video_status: 'idle' as GenerationStatus,
       generation_error: undefined,
       video_url: undefined,
+      video_path: undefined,
       video_error: undefined,
     }
 
@@ -990,6 +992,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       video_status: 'idle' as GenerationStatus,
       generation_error: undefined,
       video_url: undefined,
+      video_path: undefined,
       video_error: undefined,
     }
 
@@ -1004,6 +1007,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
       video_status: 'idle' as GenerationStatus,
       generation_error: undefined,
       video_url: undefined,
+      video_path: undefined,
       video_error: undefined,
     }
 
@@ -1168,6 +1172,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
                 image_status: 'done' as GenerationStatus,
                 generation_error: undefined,
                 video_url: undefined,
+                video_path: undefined,
                 video_status: 'idle' as GenerationStatus,
                 video_error: undefined,
               }
@@ -1508,6 +1513,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
                 image_status: 'done' as GenerationStatus,
                 generation_error: undefined,
                 video_url: undefined,
+                video_path: undefined,
                 video_status: 'idle' as GenerationStatus,
                 video_provider: undefined,
                 video_model: undefined,
@@ -1748,6 +1754,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
             ? {
                 ...item,
                 video_url: res.data.video_url,
+                video_path: res.data.video_path || item.video_path,
                 video_status: 'done' as GenerationStatus,
                 video_error: undefined,
               }
@@ -2047,6 +2054,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
             ? {
                 ...item,
                 video_url: res.data.video_url,
+                video_path: res.data.video_path || item.video_path,
                 video_status: 'done' as GenerationStatus,
                 rendered_duration: Number(res.data.rendered_duration || scene.end_time - scene.start_time),
                 video_provider: videoSettings.provider,
@@ -2188,6 +2196,7 @@ const StoryboardPanel: React.FC<Props> = ({ onSceneSelect, selectedSceneIndex })
               image_status: 'done' as GenerationStatus,
               generation_error: undefined,
               video_url: undefined,
+              video_path: undefined,
               video_status: 'idle' as GenerationStatus,
               video_provider: undefined,
               video_model: undefined,
